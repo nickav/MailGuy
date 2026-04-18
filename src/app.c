@@ -1,3 +1,5 @@
+static i64 batch_size = 25;
+
 void D_(String label, String x)
 {
     print("%.*s = %.*s\n", LIT(label), LIT(x));
@@ -30,6 +32,31 @@ b32 string_array_contains(String_Array arr, String x)
         if (string_equals(*it, x)) return true;
     }
     return false;
+}
+
+bool os_make_directory_recursive(String path)
+{
+    for (i64 i = 0; i < path.count; i += 1)
+    {
+        if (char_is_slash(path.data[i]))
+        {
+            String s = string_slice(path, 0, i);
+            if (!os_file_exists(s))
+            {
+                if (!os_make_directory(s))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    if (!os_file_exists(path))
+    {
+        return os_make_directory(path);
+    }
+
+    return true;
 }
 
 Platform_HTTP_Response auth_get(Arena *arena, String url, String token)
@@ -153,11 +180,16 @@ String json_get_header_value(JSON_Element *arr, String key)
     return result;
 }
 
-void process_message(Arena *arena, String json)
+void process_message(Arena *arena, String json, String email_dir)
 {
     JSON_Element *root = json_parse(arena, json);
 
     String id = json_get(String, root, S("id"));
+    if (!id.count)
+    {
+        D(json);
+        return;
+    }
     String tid = json_get(String, root, S("threadId"));
     String snippet = json_get(String, root, S("snippet"));
     String_Array label_ids = json_get(String_Array, root, S("labelIds"));
@@ -186,7 +218,7 @@ void process_message(Arena *arena, String json)
     for (int i = 0; i < count_of(keys); i += 1)
     {
         String k = keys[i];
-        String v = json_string_decode(arena, json_get_header_value(headers, k));
+        String v = json_get_header_value(headers, k);
         sb_print(arena, &sb, "%.*s: %.*s\n", LIT(k), LIT(v));
     }
     
@@ -205,10 +237,10 @@ void process_message(Arena *arena, String json)
 
     String name = sprint("%.*s.md", LIT(id));
     String contents = sb_to_string(arena, sb);
-    os_write_entire_file(name, contents);
+    os_write_entire_file(path_join(email_dir, name), contents);
 }
 
-void bulk_fetch_messages(Arena *arena, String_Array ids, String token)
+void bulk_fetch_messages(Arena *arena, String_Array ids, String token, String email_dir)
 {
     assert(ids.count <= 100);
     String host = S("");
@@ -231,15 +263,29 @@ void bulk_fetch_messages(Arena *arena, String_Array ids, String token)
     // NOTE(nick): skip first part because it's the "container"
     String part = string_split_iter(&at, S("HTTP/1.1 "));
 
+    i64 index = 0;
     while (part = string_split_iter(&at, S("HTTP/1.1 ")), part.count > 0)
     {
+        String s = string_slice(part, 0, string_index(part, S(" "), 0));
+        i64 status = string_to_i64(s, 10);
+
         while (part.count > 0 && part.data[0] != '{') { string_advance(&part, 1); }
         while (part.count > 0 && part.data[part.count -1] != '}') { part.count -= 1; }
 
         if (part.count > 0)
         {
-            process_message(arena, part);
+            if (status == 200)
+            {
+                process_message(arena, part, email_dir);
+            }
+            else
+            {
+                String id = ids.data[index];
+                print("Failed to fetch message id '%.*s' status %d\n", LIT(id), status);
+            }
         }
+
+        index += 1;
     }
 }
 
@@ -247,7 +293,11 @@ void app_run()
 {
     Arena *arena = arena_alloc(Gigabytes(1));
 
-    String project_dir = path_dirname(os_get_current_path());
+    String exe_dir = os_get_current_path();
+    String project_dir = path_dirname(exe_dir);
+    String email_dir = path_join(project_dir, S("emails"));
+    assert(os_make_directory_recursive(email_dir));
+
     String secrets_path = path_join(project_dir, S("client_secret.json"));
     String token_path = path_join(project_dir, S("token.json"));
 
@@ -298,11 +348,16 @@ void app_run()
     }
     // D(resp.body);
 
-    String_Array ids = fetch_message_ids(arena, token, 0);
+    String_Array ids = fetch_message_ids(arena, token, batch_size);
 
-    for (i64 i = 0; i < ids.count; i += 50)
+    for (i64 i = 0; i < ids.count; i += batch_size)
     {
-        String_Array chunk = array_slice(String_Array, ids, i, i+50);
-        bulk_fetch_messages(arena, chunk, token);
+        String_Array chunk = array_slice(String_Array, ids, i, i + batch_size);
+        bulk_fetch_messages(arena, chunk, token, email_dir);
+
+        if (i+batch_size < ids.count)
+        {
+            os_sleep(5 / 1000.0);
+        }
     }
 }

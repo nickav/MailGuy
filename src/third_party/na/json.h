@@ -26,10 +26,18 @@ typedef enum JSON_Token_Type
 }
 JSON_Token_Type;
 
+typedef enum JSON_Flags
+{
+    JSON_Flag_HasError  = 1<<1,
+    JSON_Flag_HasEscapedString = 1<<2,
+}
+JSON_Flags;
+
 typedef struct JSON_Token JSON_Token;
 struct JSON_Token
 {
     JSON_Token_Type type;
+    JSON_Flags flags;
     String value;
 };
 
@@ -128,8 +136,6 @@ function String json_token_type_to_string(JSON_Token_Type type)
         S("String"),
         S("Boolean"),
         S("Null"),
-
-        S("COUNT"),
     };
 
     String result = S("");
@@ -137,6 +143,82 @@ function String json_token_type_to_string(JSON_Token_Type type)
     {
         result = table[type];
     }
+    return result;
+}
+
+function String json_string_decode(Arena *arena, String raw)
+{
+    u8 *buf = PushArray(arena, u8, raw.count);
+    u64 len = 0;
+    u64 at = 0;
+
+    while (at < raw.count)
+    {
+        u8 c = raw.data[at];
+        at += 1;
+
+        if (c != '\\' || at >= raw.count)
+        {
+            buf[len++] = c;
+            continue;
+        }
+
+        u8 esc = raw.data[at];
+        at += 1;
+
+        switch (esc)
+        {
+            case '"':  buf[len++] = '"';  break;
+            case '\\': buf[len++] = '\\'; break;
+            case '/':  buf[len++] = '/';  break;
+            case 'n':  buf[len++] = '\n'; break;
+            case 'r':  buf[len++] = '\r'; break;
+            case 't':  buf[len++] = '\t'; break;
+            case 'b':  buf[len++] = '\b'; break;
+            case 'f':  buf[len++] = '\f'; break;
+
+            case 'u':
+            {
+                u32 cp = 0;
+                for (int i = 0; i < 4 && at < raw.count; i += 1, at += 1)
+                {
+                    u8 h = raw.data[at];
+                    u32 digit = (h >= '0' && h <= '9') ? h - '0' :
+                                (h >= 'a' && h <= 'f') ? h - 'a' + 10 :
+                                (h >= 'A' && h <= 'F') ? h - 'A' + 10 : 0;
+                    cp = (cp << 4) | digit;
+                }
+
+                // surrogate pair
+                if (cp >= 0xD800 && cp <= 0xDBFF && at + 1 < raw.count &&
+                    raw.data[at] == '\\' && raw.data[at + 1] == 'u')
+                {
+                    at += 2;
+                    u32 low = 0;
+                    for (int i = 0; i < 4 && at < raw.count; i += 1, at += 1)
+                    {
+                        u8 h = raw.data[at];
+                        u32 digit = (h >= '0' && h <= '9') ? h - '0' :
+                                    (h >= 'a' && h <= 'f') ? h - 'a' + 10 :
+                                    (h >= 'A' && h <= 'F') ? h - 'A' + 10 : 0;
+                        low = (low << 4) | digit;
+                    }
+                    if (low >= 0xDC00 && low <= 0xDFFF)
+                    {
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                    }
+                }
+
+                len += string_encode_utf8(buf + len, cp);
+            } break;
+
+            default: buf[len++] = esc; break;
+        }
+    }
+
+    String result = {0};
+    result.data  = buf;
+    result.count = len;
     return result;
 }
 
@@ -195,6 +277,7 @@ function JSON_Token json_get_token(JSON_Parser *parser)
                     if (text.data[at] == '\\' && json_in_bounds(text, at + 1))
                     {
                         u8 esc = text.data[at + 1];
+                        result.flags |= JSON_Flag_HasEscapedString;
                         at += 2;
                         if (esc == 'u')
                         {
@@ -328,6 +411,11 @@ function JSON_Element *json_parse_element(Arena *arena, JSON_Parser *parser, Str
         result->value = token.value;
         result->first_child = child;
         result->next_sibling = NULL;
+
+        if (token.flags & JSON_Flag_HasEscapedString)
+        {
+            result->value = json_string_decode(arena, token.value);
+        }
     }
 
     return result;
@@ -347,6 +435,10 @@ function JSON_Element *json_parse_list(Arena *arena, JSON_Parser *parser, JSON_T
             if (token.type == JSON_Token_String)
             {
                 label = token.value;
+                if (token.flags & JSON_Flag_HasEscapedString)
+                {
+                    label = json_string_decode(arena, token.value);
+                }
 
                 JSON_Token colon = json_get_token(parser);
                 if (colon.type == JSON_Token_Colon)
@@ -621,82 +713,6 @@ function String json_to_string(JSON_Element *element)
             result = element->value;
         }
     }
-    return result;
-}
-
-function String json_string_decode(Arena *arena, String raw)
-{
-    u8 *buf = PushArray(arena, u8, raw.count);
-    u64 len = 0;
-    u64 at = 0;
-
-    while (at < raw.count)
-    {
-        u8 c = raw.data[at];
-        at += 1;
-
-        if (c != '\\' || at >= raw.count)
-        {
-            buf[len++] = c;
-            continue;
-        }
-
-        u8 esc = raw.data[at];
-        at += 1;
-
-        switch (esc)
-        {
-            case '"':  buf[len++] = '"';  break;
-            case '\\': buf[len++] = '\\'; break;
-            case '/':  buf[len++] = '/';  break;
-            case 'n':  buf[len++] = '\n'; break;
-            case 'r':  buf[len++] = '\r'; break;
-            case 't':  buf[len++] = '\t'; break;
-            case 'b':  buf[len++] = '\b'; break;
-            case 'f':  buf[len++] = '\f'; break;
-
-            case 'u':
-            {
-                u32 cp = 0;
-                for (int i = 0; i < 4 && at < raw.count; i += 1, at += 1)
-                {
-                    u8 h = raw.data[at];
-                    u32 digit = (h >= '0' && h <= '9') ? h - '0' :
-                                (h >= 'a' && h <= 'f') ? h - 'a' + 10 :
-                                (h >= 'A' && h <= 'F') ? h - 'A' + 10 : 0;
-                    cp = (cp << 4) | digit;
-                }
-
-                // surrogate pair
-                if (cp >= 0xD800 && cp <= 0xDBFF && at + 1 < raw.count &&
-                    raw.data[at] == '\\' && raw.data[at + 1] == 'u')
-                {
-                    at += 2;
-                    u32 low = 0;
-                    for (int i = 0; i < 4 && at < raw.count; i += 1, at += 1)
-                    {
-                        u8 h = raw.data[at];
-                        u32 digit = (h >= '0' && h <= '9') ? h - '0' :
-                                    (h >= 'a' && h <= 'f') ? h - 'a' + 10 :
-                                    (h >= 'A' && h <= 'F') ? h - 'A' + 10 : 0;
-                        low = (low << 4) | digit;
-                    }
-                    if (low >= 0xDC00 && low <= 0xDFFF)
-                    {
-                        cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-                    }
-                }
-
-                len += string_encode_utf8(buf + len, cp);
-            } break;
-
-            default: buf[len++] = esc; break;
-        }
-    }
-
-    String result = {0};
-    result.data  = buf;
-    result.count = len;
     return result;
 }
 
