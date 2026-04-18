@@ -34,31 +34,6 @@ b32 string_array_contains(String_Array arr, String x)
     return false;
 }
 
-bool os_make_directory_recursive(String path)
-{
-    for (i64 i = 1; i < path.count; i += 1)
-    {
-        if (char_is_slash(path.data[i]))
-        {
-            String s = string_slice(path, 0, i);
-            if (!os_file_exists(s))
-            {
-                if (!os_make_directory(s))
-                {
-                    return false;
-                }
-            }
-        }
-    }
-
-    if (!os_file_exists(path))
-    {
-        return os_make_directory(path);
-    }
-
-    return true;
-}
-
 Platform_HTTP_Response auth_get(Arena *arena, String url, String token)
 {
     String headers = string_print(arena, "Authorization: Bearer %.*s\r\nAccept: application/json", LIT(token));

@@ -249,6 +249,8 @@ function String platform__get_google_token(Arena *arena, String client_id, Strin
 
     os_shell_open(url);
 
+    print("Waiting for auth...\n");
+
     String request = S("");
     while (!request.count)
     {
