@@ -754,6 +754,7 @@ function b32 json_get_b32(JSON_Element *object, String child_name)
 
 function void json_dump_internal(JSON_Element *element, i64 depth)
 {
+    if (!element) return;
     for (i64 i = 0; i < depth; i += 1) print("  ");
     print("%c\n", json_is_array(element) ? '[' : '{');
 
@@ -794,4 +795,48 @@ function void json_dump_internal(JSON_Element *element, i64 depth)
 function void json_dump(JSON_Element *element)
 {
     json_dump_internal(element, 0);
+}
+
+function void json_stringify_internal(Arena *arena, String_Builder *sb, JSON_Element *element)
+{
+    if (!element) return;
+    sb_print(arena, sb, "%c", json_is_array(element) ? '[' : '{');
+
+    for (JSON_EachChild(element))
+    {
+        if (it->label.count > 0)
+        {
+            sb_print(arena, sb, "\"%.*s\":", LIT(it->label));
+        }
+
+        if (it->type == JSON_Token_Array || it->type == JSON_Token_Object)
+        {
+            json_stringify_internal(arena, sb, it);
+        }
+        else
+        {
+            if (it->type == JSON_Token_String)
+            {
+                sb_print(arena, sb, "\"%.*s\"", LIT(it->value));
+            }
+            else
+            {
+                sb_print(arena, sb, "%.*s", LIT(it->value));
+            }
+        }
+
+        if (it->next_sibling)
+        {
+            sb_print(arena, sb, ",");
+        }
+    }
+
+    sb_print(arena, sb, "%c", json_is_array(element) ? ']' : '}');
+}
+
+function String json_stringify(Arena *arena, JSON_Element *element)
+{
+    String_Builder sb = {0};
+    json_stringify_internal(arena, &sb, element);
+    return sb_to_string(arena, sb);
 }

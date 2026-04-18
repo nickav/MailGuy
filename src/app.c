@@ -74,11 +74,6 @@ String_Array fetch_message_ids(Arena *arena, String token, i64 n)
     return result;
 }
 
-// bool get_new_messages(String last_message_id)
-// {
-//     https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId=12345
-// }
-
 // JSON_Element *get_user_profile(String token)
 // {
 //     Platform_HTTP_Response resp = auth_get(arena, sprint("https://gmail.googleapis.com/gmail/v1/users/me/profile", token);
@@ -91,6 +86,22 @@ String_Array fetch_message_ids(Arena *arena, String token, i64 n)
   "historyId": "12345"
 }
 */
+
+JSON_Element *fetch_user_profile(Arena *arena, String token)
+{
+    Platform_HTTP_Response resp = auth_get(arena, S("https://gmail.googleapis.com/gmail/v1/users/me/profile"), token);
+    D(resp.body);
+    if (resp.status != 200) return 0;
+    return json_parse(arena, resp.body);
+}
+
+void fetch_history(Arena *arena, String history_id, String token)
+{
+    String url = sprint("https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId=%.*s&historyTypes=messageAdded&historyTypes=messageDeleted", LIT(history_id));
+    Platform_HTTP_Response resp = auth_get(arena, url, token);
+    D(resp.body);
+    D(i64_to_string(resp.status));
+}
 
 String get_body_content(Arena *arena, JSON_Element *payload, String desired_mimeType)
 {
@@ -167,6 +178,7 @@ void process_message(Arena *arena, String json, String email_dir)
         D(json);
         return;
     }
+
     String tid = json_get(String, root, S("threadId"));
     String snippet = json_get(String, root, S("snippet"));
     String_Array label_ids = json_get(String_Array, root, S("labelIds"));
@@ -198,12 +210,14 @@ void process_message(Arena *arena, String json, String email_dir)
         String v = json_get_header_value(headers, k);
         sb_print(arena, &sb, "%.*s: %.*s\n", LIT(k), LIT(v));
     }
+
+    String raw_headers = json_stringify(arena, headers);
     
     sb_print(arena, &sb, "snippet: %.*s\n", LIT(tid));
     sb_print(arena, &sb, "is_read: %d\n", !string_array_contains(label_ids, S("UNREAD")));
     sb_print(arena, &sb, "is_starred: %d\n", string_array_contains(label_ids, S("STARRED")));
     sb_print(arena, &sb, "is_draft: %d\n", string_array_contains(label_ids, S("DRAFT")));
-    // sb_print(arena, &sb, "raw_headers: %.*s\n", LIT(tid));
+    sb_print(arena, &sb, "raw_headers: %.*s\n", LIT(raw_headers));
     sb_print(arena, &sb, "---\n");
     sb_print(arena, &sb, "\n\n");
 
@@ -273,7 +287,10 @@ void app_run()
     String exe_dir = os_get_current_path();
     String project_dir = path_dirname(exe_dir);
     String email_dir = path_join(project_dir, S("emails"));
+    String attachments_dir = path_join(email_dir, S("attachements"));
+
     assert(os_make_directory_recursive(email_dir));
+    assert(os_make_directory_recursive(attachments_dir));
 
     String secrets_path = path_join(project_dir, S("client_secret.json"));
     String token_path = path_join(project_dir, S("token.json"));
@@ -340,16 +357,58 @@ void app_run()
     }
     // D(resp.body);
 
-    String_Array ids = fetch_message_ids(arena, token, batch_size);
+    print("Scanning directory...\n");
+
+    String_Array files = {0};
+    File_Lister *it = os_file_iter_begin(arena, email_dir);
+    File_Info info = {0};
+    while (os_file_iter_next(arena, it, &info))
+    {
+        if (string_starts_with(info.name, S("."))) continue;
+        String name = string_push(arena, info.name);
+        array_push(arena, &files, name);
+    }
+
+    print("Fetching profile...\n");
+    JSON_Element *profile = fetch_user_profile(arena, token);
+
+    print("Fetching ids...\n");
+
+    String_Array all_ids = fetch_message_ids(arena, token, 0);
+    print("Total id count: %d\n", all_ids.count);
+
+    bool force = true;
+
+    String_Array ids = {0};
+    for (i64 i = 0; i < ids.count; i += 1)
+    {
+        String id = ids.data[i];
+        String name = sprint("%.*s.md", LIT(id));
+        if (!string_array_contains(files, name))
+        {
+            array_push(arena, &ids, id);
+        }
+    }
+
+    if (force)
+    {
+        ids = all_ids;
+    }
+
+    print("Already cached: %d\n", (all_ids.count - ids.count));
 
     for (i64 i = 0; i < ids.count; i += batch_size)
     {
         String_Array chunk = array_slice(String_Array, ids, i, i + batch_size);
         bulk_fetch_messages(arena, chunk, token, email_dir);
+        print("Fetching chunk (%d, %d)...\n", i, i+batch_size);
 
         if (i+batch_size < ids.count)
         {
-            os_sleep(5 / 1000.0);
+            os_sleep(20 / 1000.0);
         }
     }
+
+    print("Fetched %d emails\n", ids.count);
+    print("Done! Took %.2fms\n", os_time() * 1000.0);
 }
