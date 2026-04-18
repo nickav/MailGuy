@@ -1,5 +1,10 @@
 #pragma once
 
+#ifndef Pow
+#include <math.h>
+#define Pow pow
+#endif // Pow
+
 #define JSON_EachChild(root) JSON_Element *it = (root)->first_child; it != NULL; it = it->next_sibling
 #define JSON_Each(elem) JSON_Element *it = (elem); it != NULL; it = it->next_sibling
 
@@ -512,7 +517,10 @@ function JSON_Element *json_parse(Arena *arena, String text)
         json_error(&parser, json_get_token(&parser), "Unexpected token in JSON (expected EOF)");
     }
 
-    result->error = parser.error;
+    if (result)
+    {
+        result->error = parser.error;
+    }
     
     return result;
 }
@@ -690,7 +698,7 @@ function f64 json_to_f64(JSON_Element *element)
             }
 
             exponent = exponent_sign * exponent;
-            number *= pow(10.0, exponent);
+            number *= Pow(10.0, exponent);
         }
 
         result = sign * number;

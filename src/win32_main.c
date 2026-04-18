@@ -301,6 +301,7 @@ function String platform__get_google_token(Arena *arena, String client_id, Strin
 function String platform__refresh_google_token(Arena *arena, String client_id, String client_secret, String token)
 {
     JSON_Element *root = json_parse(arena, token);
+    if (!root) return S("");
     String refresh_token = json_to_string(json_find(root, S("refresh_token")));
 
     String body = string_print(arena,

@@ -36,7 +36,7 @@ b32 string_array_contains(String_Array arr, String x)
 
 bool os_make_directory_recursive(String path)
 {
-    for (i64 i = 0; i < path.count; i += 1)
+    for (i64 i = 1; i < path.count; i += 1)
     {
         if (char_is_slash(path.data[i]))
         {
@@ -75,6 +75,7 @@ String_Array fetch_message_ids(Arena *arena, String token, i64 n)
         if (resp.status != 200) break;
 
         JSON_Element *json = json_parse(arena, resp.body);
+        if (!json) break;
         JSON_Element *messages = json_find(json, S("messages"));
 
         for (JSON_EachChild(messages))
@@ -183,6 +184,7 @@ String json_get_header_value(JSON_Element *arr, String key)
 void process_message(Arena *arena, String json, String email_dir)
 {
     JSON_Element *root = json_parse(arena, json);
+    if (!root) return;
 
     String id = json_get(String, root, S("id"));
     if (!id.count)
@@ -301,8 +303,20 @@ void app_run()
     String secrets_path = path_join(project_dir, S("client_secret.json"));
     String token_path = path_join(project_dir, S("token.json"));
 
+    if (!os_file_exists(secrets_path))
+    {
+        print("Missing client_secret.json! Expected at: %.*s\n", LIT(secrets_path));
+        return;
+    }
+
     String contents = os_read_entire_file(arena, secrets_path);
     JSON_Element *root = json_parse(arena, contents);
+    if (!root)
+    {
+        print("Failed to parse JSON\n");
+        return;
+    }
+
     JSON_Element *xx = json_find(root, S("installed"));
     D(i64_to_string(json_child_count(xx)));
     String client_id = json_get(String, xx, S("client_id"));
@@ -335,7 +349,10 @@ void app_run()
     String token = S("");
     {
         JSON_Element *root = json_parse(arena, token_json);
-        token = json_to_string(json_find(root, S("access_token")));
+        if (root)
+        {
+            token = json_to_string(json_find(root, S("access_token")));
+        }
     }
     D(token);
 
