@@ -4,6 +4,7 @@
 #define impl
 #include "third_party/na/na.h"
 #include "third_party/na/json.h"
+#include "third_party/base64.h"
 
 #include <winhttp.h>
 #include <winsock2.h>
@@ -15,6 +16,7 @@ struct Platform_HTTP_Response
 {
     i64 status;
     String body;
+    String headers;
 };
 
 function Platform_HTTP_Response platform__http_get(Arena *arena, String url, String headers)
@@ -59,6 +61,15 @@ function Platform_HTTP_Response platform__http_get(Arena *arena, String url, Str
     DWORD size   = sizeof(status);
     WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX);
 
+    DWORD headers_size = 0;
+    WinHttpQueryHeaders(request, WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_HEADER_NAME_BY_INDEX, NULL, &headers_size, WINHTTP_NO_HEADER_INDEX);
+
+    u16 *headers_buf = PushArrayNoZero(arena, u16, headers_size / sizeof(u16));
+    WinHttpQueryHeaders(request, WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_HEADER_NAME_BY_INDEX, headers_buf, &headers_size, WINHTTP_NO_HEADER_INDEX);
+
+    String16 resp_headers16 = Str16(headers_buf, headers_size / sizeof(u16));
+    String resp_headers = string_from_string16(arena, resp_headers16);
+
     String result = {0};
     DWORD bytes = 0;
     do {
@@ -78,6 +89,7 @@ function Platform_HTTP_Response platform__http_get(Arena *arena, String url, Str
     Platform_HTTP_Response resp = {0};
     resp.status = status;
     resp.body = result;
+    resp.headers = resp_headers;
     return resp;
 }
 
@@ -122,6 +134,15 @@ function Platform_HTTP_Response platform__http_post(Arena *arena, String url, St
     DWORD size   = sizeof(status);
     WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX);
 
+    DWORD headers_size = 0;
+    WinHttpQueryHeaders(request, WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_HEADER_NAME_BY_INDEX, NULL, &headers_size, WINHTTP_NO_HEADER_INDEX);
+
+    u16 *headers_buf = PushArrayNoZero(arena, u16, headers_size / sizeof(u16));
+    WinHttpQueryHeaders(request, WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_HEADER_NAME_BY_INDEX, headers_buf, &headers_size, WINHTTP_NO_HEADER_INDEX);
+
+    String16 resp_headers16 = Str16(headers_buf, headers_size / sizeof(u16));
+    String resp_headers = string_from_string16(arena, resp_headers16);
+
     String result = {0};
     DWORD bytes = 0;
     do {
@@ -141,6 +162,7 @@ function Platform_HTTP_Response platform__http_post(Arena *arena, String url, St
     Platform_HTTP_Response resp = {0};
     resp.status = status;
     resp.body = result;
+    resp.headers = resp_headers;
     return resp;
 }
 

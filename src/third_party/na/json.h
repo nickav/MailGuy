@@ -47,6 +47,7 @@ struct JSON_Element
     JSON_Token_Type type;
     String label;
     String value;
+    b32 error;
 
     JSON_Element *first_child;
     JSON_Element *next_sibling;
@@ -191,12 +192,19 @@ function JSON_Token json_get_token(JSON_Parser *parser)
                 u64 start = at;
                 while (json_in_bounds(text, at) && text.data[at] != '"')
                 {
-                    if (json_in_bounds(text, at + 1) && text.data[at] == '\\' && text.data[at + 1] == '"')
+                    if (text.data[at] == '\\' && json_in_bounds(text, at + 1))
+                    {
+                        u8 esc = text.data[at + 1];
+                        at += 2;
+                        if (esc == 'u')
+                        {
+                            for (int i = 0; i < 4 && json_in_bounds(text, at); i += 1, at += 1);
+                        }
+                    }
+                    else
                     {
                         at += 1;
                     }
-
-                    at += 1;
                 }
 
                 result.value.data = text.data + start;
@@ -411,8 +419,15 @@ function JSON_Element *json_parse(Arena *arena, String text)
     {
         json_error(&parser, json_get_token(&parser), "Unexpected token in JSON (expected EOF)");
     }
+
+    result->error = parser.error;
     
     return result;
+}
+
+function b32 json_is_error(JSON_Element *element)
+{
+    return element->error;
 }
 
 function JSON_Element *json_find(JSON_Element *object, String child_name)
@@ -430,6 +445,16 @@ function JSON_Element *json_find(JSON_Element *object, String child_name)
         }
     }
     return result;
+}
+
+function JSON_Element *json_find2(JSON_Element *object, String key1, String key2)
+{
+    return json_find(json_find(object, key1), key2);
+}
+
+function JSON_Element *json_find3(JSON_Element *object, String key1, String key2, String key3)
+{
+    return json_find(json_find(json_find(object, key1), key2), key3);
 }
 
 function u64 json_child_count(JSON_Element *element)
@@ -598,6 +623,110 @@ function String json_to_string(JSON_Element *element)
     }
     return result;
 }
+
+function String json_string_decode(Arena *arena, String raw)
+{
+    u8 *buf = PushArray(arena, u8, raw.count);
+    u64 len = 0;
+    u64 at = 0;
+
+    while (at < raw.count)
+    {
+        u8 c = raw.data[at];
+        at += 1;
+
+        if (c != '\\' || at >= raw.count)
+        {
+            buf[len++] = c;
+            continue;
+        }
+
+        u8 esc = raw.data[at];
+        at += 1;
+
+        switch (esc)
+        {
+            case '"':  buf[len++] = '"';  break;
+            case '\\': buf[len++] = '\\'; break;
+            case '/':  buf[len++] = '/';  break;
+            case 'n':  buf[len++] = '\n'; break;
+            case 'r':  buf[len++] = '\r'; break;
+            case 't':  buf[len++] = '\t'; break;
+            case 'b':  buf[len++] = '\b'; break;
+            case 'f':  buf[len++] = '\f'; break;
+
+            case 'u':
+            {
+                u32 cp = 0;
+                for (int i = 0; i < 4 && at < raw.count; i += 1, at += 1)
+                {
+                    u8 h = raw.data[at];
+                    u32 digit = (h >= '0' && h <= '9') ? h - '0' :
+                                (h >= 'a' && h <= 'f') ? h - 'a' + 10 :
+                                (h >= 'A' && h <= 'F') ? h - 'A' + 10 : 0;
+                    cp = (cp << 4) | digit;
+                }
+
+                // surrogate pair
+                if (cp >= 0xD800 && cp <= 0xDBFF && at + 1 < raw.count &&
+                    raw.data[at] == '\\' && raw.data[at + 1] == 'u')
+                {
+                    at += 2;
+                    u32 low = 0;
+                    for (int i = 0; i < 4 && at < raw.count; i += 1, at += 1)
+                    {
+                        u8 h = raw.data[at];
+                        u32 digit = (h >= '0' && h <= '9') ? h - '0' :
+                                    (h >= 'a' && h <= 'f') ? h - 'a' + 10 :
+                                    (h >= 'A' && h <= 'F') ? h - 'A' + 10 : 0;
+                        low = (low << 4) | digit;
+                    }
+                    if (low >= 0xDC00 && low <= 0xDFFF)
+                    {
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                    }
+                }
+
+                len += string_encode_utf8(buf + len, cp);
+            } break;
+
+            default: buf[len++] = esc; break;
+        }
+    }
+
+    String result = {0};
+    result.data  = buf;
+    result.count = len;
+    return result;
+}
+
+function String json_to_String(JSON_Element *element)
+{
+    return json_to_string(element);
+}
+
+function String json_get_String(JSON_Element *object, String child_name)
+{
+    return json_to_string(json_find(object, child_name));
+}
+
+function i64 json_get_i64(JSON_Element *object, String child_name)
+{
+    return json_to_i64(json_find(object, child_name));
+}
+
+function b32 json_get_f64(JSON_Element *object, String child_name)
+{
+    return json_to_f64(json_find(object, child_name));
+}
+
+function b32 json_get_b32(JSON_Element *object, String child_name)
+{
+    return json_to_b32(json_find(object, child_name));
+}
+
+#define json_get(T, object, key) json_get_##T(object, key)
+#define json_to(T, object) json_to_##T(object)
 
 function void json_dump_internal(JSON_Element *element, i64 depth)
 {

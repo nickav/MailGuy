@@ -881,6 +881,12 @@ struct String_List
     u64 total_size;
 };
 
+typedef struct String_Builder String_Builder;
+struct String_Builder
+{
+    String_List list;
+};
+
 typedef struct String_Join_Params String_Join_Params;
 struct String_Join_Params
 {
@@ -977,6 +983,8 @@ function i64 string_char_index(String str, u8 search, i64 start_index);
 function i64 string_last_index(String str, String search);
 function b32 string_contains(String str, String search);
 function b32 string_in_bounds(String str, i64 at);
+function void string_advance(String *str, i64 count);
+function String string_split_iter(String *text, String search);
 
 // Allocation
 function String string_push(Arena *arena, String str);
@@ -1059,6 +1067,12 @@ function void string_to_lower(String *str);
 function void string_to_upper(String *str);
 function String string_lower(Arena *arena, String str);
 function String string_upper(Arena *arena, String str);
+
+// String Builder
+function void sb_push(Arena *arena, String_Builder *builder, String str);
+function void sb_print(Arena *arena, String_Builder *builder, const char *fmt, ...);
+function String sb_to_string(Arena *arena, String_Builder builder);
+function void sb_reset(String_Builder *sb);
 
 // Path Helpers
 function String path_filename(String path);
@@ -2985,18 +2999,23 @@ function b32 string_in_bounds(String str, i64 at) {
     return at < str.count;
 }
 
-function String string_split_iter(String text, String search, i64 *index)
+function void string_advance(String *str, i64 count)
 {
-    i64 next_index = *index+1;
-    while (next_index < text.count-search.count+1)
+    str->count -= count;
+    str->data += count;
+}
+
+function String string_split_iter(String *text, String search)
+{
+    i64 i = 0;
+    while (i < text->count - search.count + 1)
     {
-        // @Speed: directly comparing the memory is _much_ faster than using string_slice and string_equals
-        if (MemoryEquals(text.data+next_index, search.data, search.count)) break;
-        next_index += 1;
+        if (MemoryEquals(text->data + i, search.data, search.count)) break;
+        i += 1;
     }
 
-    String result = string_slice(text, *index, next_index);
-    *index = next_index;
+    String result = string_slice(*text, 0, i);
+    *text = string_slice(*text, i + search.count, text->count);
     return result;
 }
 
@@ -4069,6 +4088,34 @@ function String string_upper(Arena *arena, String str)
     String result = string_push(arena, str);
     string_to_upper(&result);
     return result;
+}
+
+//
+// String Builder
+//
+
+function void sb_push(Arena *arena, String_Builder *sb, String str)
+{
+    string_list_push(arena, &sb->list, str);
+}
+
+function void sb_print(Arena *arena, String_Builder *sb, const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    String str = string_printv(arena, fmt, args);
+    va_end(args);
+    string_list_push(arena, &sb->list, str);
+}
+
+function String sb_to_string(Arena *arena, String_Builder sb)
+{
+    return string_list_to_string(arena, &sb.list);
+}
+
+function void sb_reset(String_Builder *sb)
+{
+    sb->list = StructLit(String_List){0};
 }
 
 //
@@ -8071,6 +8118,8 @@ struct Raw_Array
 #define array_search(it, key, cmp) (array__search(array__to_Raw_Array_T(&(it)), key, cmp))
 
 #define array_find(it, key, cmp) (array__find(array__to_Raw_Array_T(&(it)), key, cmp))
+    
+#define array_slice(T, arr, s, e) StructLit(T){ (e)-(s), (e)-(s), (arr).data+(s) }
 
 //
 // Array Helpers
