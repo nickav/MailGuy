@@ -34,6 +34,141 @@ b32 string_array_contains(String_Array arr, String x)
     return false;
 }
 
+b32 string_array_any_includes(String_Array arr, String x)
+{
+    for (Array_Each(String, it, arr))
+    {
+        if (string_includes(*it, x)) return true;
+    }
+    return false;
+}
+
+// returns 1-12 if valid or 0 otherwise
+u8 date_month_from_string(String mon)
+{
+    String months[] = {
+        S(""),
+        S("Jan"),
+        S("Feb"),
+        S("Mar"),
+        S("Apr"),
+        S("May"),
+        S("Jun"),
+        S("Jul"),
+        S("Aug"),
+        S("Sep"),
+        S("Oct"),
+        S("Nov"),
+        S("Dec"),
+    };
+
+    mon = string_slice(mon, 0, 3);
+
+    for (int i = 1; i < count_of(months); i++)
+    {
+        String it = months[i];
+        if (string_match(it, mon, MatchFlag_IgnoreCase))
+        {
+            return i;
+        }
+    }
+    return 0;
+}
+
+Date_Time parse_email_date(String date)
+{
+    D(date);
+    Date_Time result = {0};
+
+    // Skip optional day of week
+    i64 comma = string_index(date, S(","), 0);
+    if (comma >= 0)
+    {
+        date = string_skip(date, comma+1);
+    }
+
+    // Skip optional TZ label
+    i64 paren = string_index(date, S("("), 0);
+    if (paren >= 0)
+    {
+        date = string_prefix(date, paren);
+    }
+
+    date = string_trim_whitespace(date);
+
+    // Now we should have a string that looks like this:
+    // 19 Oct 2011 22:39:55 -0400
+
+    i64 spaces = 0;
+    i64 i = 0;
+    for (; i < date.count; i += 1)
+    {
+        if (date.data[i] == ' ')
+        {
+            spaces += 1;
+            if (spaces >= 3) { break; }
+        }
+    }
+
+    String date_part = string_slice(date, 0, i);
+
+    i += 1;
+    i64 start = i;
+    for (; i < date.count; i += 1)
+    {
+        if (date.data[i] == ' ') { break; }
+    }
+    String time_part = string_slice(date, start, i);
+
+    i64 last_space = i;
+    for (; i < date.count; i += 1)
+    {
+        if (date.data[i] == ' ') { last_space = i; }
+    }
+    String tz_part = string_slice(date, last_space+1, date.count);
+
+    // D(date_part); D(time_part); D(tz_part);
+
+    // date part
+    {
+        i64 s1 = string_find(date_part, S(" "), 0, 0);
+        i64 s2 = string_find(date_part, S(" "), s1+1, 0);
+
+        String day = string_slice(date_part, 0, s1);
+        String mon = string_slice(date_part, s1+1, s2);
+        String year = string_slice(date_part, s2+1, date_part.count);
+        // D(day); D(mon); D(year);
+
+        result.day = string_to_i64(day, 10);
+        result.mon = date_month_from_string(mon);
+        result.year = string_to_i64(year, 10);
+        // D(i64_to_string(result.day)); D(i64_to_string(result.mon)); D(i64_to_string(result.year));
+    }
+
+    // time part
+    {
+        i64 c1 = string_find(time_part, S(":"), 0, 0);
+        i64 c2 = string_find(time_part, S(":"), c1+1, 0);
+
+        String hh = string_slice(time_part, 0, c1);
+        String mm = string_slice(time_part, c1+1, c2);
+        String ss = string_slice(time_part, c2+1, time_part.count);
+
+        result.hour = string_to_i64(hh, 10);
+        result.min = string_to_i64(mm, 10);
+        result.sec = string_to_i64(ss, 10);
+        // D(i64_to_string(result.hour)); D(i64_to_string(result.min)); D(i64_to_string(result.sec));
+    }
+
+    // tz part
+    {
+    }
+
+    // @Incomplete: convert date time to dense time, then apply tz adjustment, then convert back
+
+    return result;
+}
+
 Platform_HTTP_Response auth_get(Arena *arena, String url, String token)
 {
     String headers = string_print(arena, "Authorization: Bearer %.*s\r\nAccept: application/json", LIT(token));
@@ -46,7 +181,7 @@ String_Array fetch_message_ids(Arena *arena, String token, i64 n)
     String page_token = S("");
     while (true)
     {
-        i64 count = Min(n, 500);
+        i64 count = n > 0 ? Min(n, 500) : 500;
         Platform_HTTP_Response resp = auth_get(arena, sprint("https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=%d&includeSpamTrash=1&pageToken=%.*s", count, LIT(page_token)), token);
         if (resp.status != 200) break;
 
@@ -205,6 +340,9 @@ void process_message(Arena *arena, String json, String email_dir)
         S("Reply-To"),
     };
 
+    String date = json_get_header_value(headers, S("Date"));
+    parse_email_date(date);
+
     for (int i = 0; i < count_of(keys); i += 1)
     {
         String k = keys[i];
@@ -215,7 +353,7 @@ void process_message(Arena *arena, String json, String email_dir)
     String raw_labels = string_join(arena, label_ids, S(", "));
     String raw_headers = json_stringify(arena, headers);
     
-    sb_print(arena, &sb, "snippet: %.*s\n", LIT(tid));
+    sb_print(arena, &sb, "snippet: %.*s\n", LIT(snippet));
     sb_print(arena, &sb, "is_read: %d\n", !string_array_contains(label_ids, S("UNREAD")));
     sb_print(arena, &sb, "is_starred: %d\n", string_array_contains(label_ids, S("STARRED")));
     sb_print(arena, &sb, "is_draft: %d\n", string_array_contains(label_ids, S("DRAFT")));
@@ -225,9 +363,12 @@ void process_message(Arena *arena, String json, String email_dir)
     sb_print(arena, &sb, "\n\n");
 
     sb_push(arena, &sb, text);
-    sb_push(arena, &sb, S("\n\n<!--html\n"));
-    sb_push(arena, &sb, html);
-    sb_push(arena, &sb, S("\n-->\n"));
+    if (html.count > 0)
+    {
+        sb_push(arena, &sb, S("\n\n<!--html\n"));
+        sb_push(arena, &sb, html);
+        sb_push(arena, &sb, S("\n-->\n"));
+    }
 
     String name = sprint("%.*s.md", LIT(id));
     String contents = sb_to_string(arena, sb);
@@ -377,7 +518,7 @@ void app_run()
 
     print("Fetching ids...\n");
 
-    String_Array all_ids = fetch_message_ids(arena, token, batch_size);
+    String_Array all_ids = fetch_message_ids(arena, token, 0);
     print("Total id count: %d\n", all_ids.count);
 
     bool force = false;
