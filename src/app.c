@@ -517,7 +517,7 @@ void app_menu(i32 x, i32 y)
     {
         case 1:
         {
-            MessageBoxW(NULL, L"Hello!", L"Hi", MB_OK);
+            // MessageBoxW(NULL, L"Hello!", L"Hi", MB_OK);
         } break;
 
         case 2:

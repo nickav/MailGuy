@@ -1,3 +1,6 @@
+#import <Cocoa/Cocoa.h>
+#import <CoreGraphics/CoreGraphics.h>
+
 #define STB_SPRINTF_IMPLEMENTATION
 #include "third_party/stb/stb_sprintf.h"
 
@@ -237,8 +240,6 @@ function String platform__get_google_token(Arena *arena, String client_id, Strin
 
     os_shell_open(url);
 
-    print("Waiting for auth...\n");
-
     String request = S("");
     while (!request.count)
     {
@@ -284,11 +285,161 @@ function String platform__refresh_google_token(Arena *arena, String client_id, S
 
 #include "app.c"
 
+static bool          g_is_running  = true;
+static long          g_menu_result = -1;
+static NSStatusItem *g_status_item = nil;
+
+@interface MenuTarget : NSObject
+- (void)menuAction:(NSMenuItem *)sender;
+- (void)trayClicked:(id)sender;
+@end
+
+@implementation MenuTarget
+
+- (void)menuAction:(NSMenuItem *)sender
+{
+    g_menu_result = sender.tag;
+}
+
+- (void)trayClicked:(id)sender
+{
+    NSPoint loc    = [NSEvent mouseLocation];
+    CGRect  bounds = CGDisplayBounds(CGMainDisplayID());
+    app_menu((i32)loc.x, (i32)(bounds.size.height - loc.y));
+}
+
+@end
+
+static MenuTarget *g_menu_target = nil;
+
+static NSMenu *macos__menu_build(Arena *arena, MenuItem *items, u64 count)
+{
+    NSMenu *menu = [[NSMenu alloc] init];
+    menu.autoenablesItems = NO;
+
+    for (u64 i = 0; i < count; i++)
+    {
+        MenuItem *it = &items[i];
+        if (it->hidden) continue;
+
+        if (it->separator)
+        {
+            [menu addItem:[NSMenuItem separatorItem]];
+            continue;
+        }
+
+        char *cstr = (char *)PushArrayNoZero(arena, u8, it->name.count + 1);
+        memcpy(cstr, it->name.data, it->name.count);
+        cstr[it->name.count] = 0;
+
+        NSMenuItem *item = [[NSMenuItem alloc]
+            initWithTitle:[NSString stringWithUTF8String:cstr]
+                   action:@selector(menuAction:)
+            keyEquivalent:@""];
+
+        item.tag    = (NSInteger)it->id;
+        item.target = g_menu_target;
+
+        if (it->disabled) item.enabled = NO;
+        if (it->checked)  item.state   = NSControlStateValueOn;
+
+        if (it->subitems.data && it->subitems.count > 0)
+        {
+            item.submenu = macos__menu_build(arena, it->subitems.data, it->subitems.count);
+        }
+
+        [menu addItem:item];
+    }
+
+    return menu;
+}
+
+function i64 platform__show_menu(MenuItem *items, u64 count, i32 x, i32 y)
+{
+    M_Temp scratch = GetScratch(0, 0);
+
+    NSMenu *menu  = macos__menu_build(scratch.arena, items, count);
+    CGRect bounds = CGDisplayBounds(CGMainDisplayID());
+    NSPoint pt    = NSMakePoint((CGFloat)x, bounds.size.height - (CGFloat)y);
+
+    g_menu_result = -1;
+    [menu popUpMenuPositioningItem:nil atLocation:pt inView:nil];
+
+    i64 result = g_menu_result;
+    ReleaseScratch(scratch);
+    return result;
+}
+
+static void macos__tray_init(void)
+{
+    g_menu_target = [[MenuTarget alloc] init];
+
+    g_status_item = [[NSStatusBar systemStatusBar] statusItemWithLength:NSSquareStatusItemLength];
+    [g_status_item retain];
+
+    NSImage *image = nil;
+    if (@available(macOS 11.0, *))
+    {
+        image = [NSImage imageWithSystemSymbolName:@"envelope" accessibilityDescription:nil];
+    }
+    if (!image)
+    {
+        image = [[NSImage alloc] initWithSize:NSMakeSize(18, 18)];
+        [image lockFocus];
+        [@"✉" drawAtPoint:NSZeroPoint withAttributes:@{NSFontAttributeName: [NSFont systemFontOfSize:14]}];
+        [image unlockFocus];
+    }
+    image.template = YES;
+
+    NSStatusBarButton *button = g_status_item.button;
+    button.image  = image;
+    button.target = g_menu_target;
+    button.action = @selector(trayClicked:);
+    [button sendActionOn:NSEventMaskLeftMouseDown|NSEventMaskRightMouseDown];
+}
+
+function void platform__quit()
+{
+    if (g_status_item)
+    {
+        [[NSStatusBar systemStatusBar] removeStatusItem:g_status_item];
+        g_status_item = nil;
+    }
+    g_is_running = false;
+}
+
 int main(int argc, char **argv)
 {
     curl_global_init(CURL_GLOBAL_ALL);
     os_init();
-    app_run();
+
+    [NSApplication sharedApplication];
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    [NSApp finishLaunching];
+
+    macos__tray_init();
+
+    [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+
+    // NOTE(nick): run in another thread so the tray icon can be interactive...
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        app_run();
+    });
+
+    NSDate *past = [NSDate distantPast];
+    NSString *mode = NSDefaultRunLoopMode;
+    while (g_is_running)
+    {
+        NSEvent *event;
+        while ((event = [NSApp nextEventMatchingMask:NSEventMaskAny untilDate:past inMode:mode dequeue:YES]))
+        {
+            [NSApp sendEvent:event];
+        }
+        app_tick();
+        usleep(16000);
+    }
+
+    app_quit();
     curl_global_cleanup();
     return 0;
 }
