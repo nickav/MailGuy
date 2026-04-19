@@ -46,7 +46,8 @@ String_Array fetch_message_ids(Arena *arena, String token, i64 n)
     String page_token = S("");
     while (true)
     {
-        Platform_HTTP_Response resp = auth_get(arena, sprint("https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=500&includeSpamTrash=1&pageToken=%.*s", LIT(page_token)), token);
+        i64 count = Min(n, 500);
+        Platform_HTTP_Response resp = auth_get(arena, sprint("https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=%d&includeSpamTrash=1&pageToken=%.*s", count, LIT(page_token)), token);
         if (resp.status != 200) break;
 
         JSON_Element *json = json_parse(arena, resp.body);
@@ -211,13 +212,15 @@ void process_message(Arena *arena, String json, String email_dir)
         sb_print(arena, &sb, "%.*s: %.*s\n", LIT(k), LIT(v));
     }
 
+    String raw_labels = string_join(arena, label_ids, S(", "));
     String raw_headers = json_stringify(arena, headers);
     
     sb_print(arena, &sb, "snippet: %.*s\n", LIT(tid));
     sb_print(arena, &sb, "is_read: %d\n", !string_array_contains(label_ids, S("UNREAD")));
     sb_print(arena, &sb, "is_starred: %d\n", string_array_contains(label_ids, S("STARRED")));
     sb_print(arena, &sb, "is_draft: %d\n", string_array_contains(label_ids, S("DRAFT")));
-    sb_print(arena, &sb, "raw_headers: %.*s\n", LIT(raw_headers));
+    sb_print(arena, &sb, "headers: %.*s\n", LIT(raw_headers));
+    sb_print(arena, &sb, "labels: %.*s\n", LIT(raw_labels));
     sb_print(arena, &sb, "---\n");
     sb_print(arena, &sb, "\n\n");
 
@@ -374,15 +377,15 @@ void app_run()
 
     print("Fetching ids...\n");
 
-    String_Array all_ids = fetch_message_ids(arena, token, 0);
+    String_Array all_ids = fetch_message_ids(arena, token, batch_size);
     print("Total id count: %d\n", all_ids.count);
 
-    bool force = true;
+    bool force = false;
 
     String_Array ids = {0};
-    for (i64 i = 0; i < ids.count; i += 1)
+    for (i64 i = 0; i < all_ids.count; i += 1)
     {
-        String id = ids.data[i];
+        String id = all_ids.data[i];
         String name = sprint("%.*s.md", LIT(id));
         if (!string_array_contains(files, name))
         {
@@ -396,10 +399,12 @@ void app_run()
     }
 
     print("Already cached: %d\n", (all_ids.count - ids.count));
+    print("IDs to fetch: %d\n", ids.count);
 
     for (i64 i = 0; i < ids.count; i += batch_size)
     {
         String_Array chunk = array_slice(String_Array, ids, i, i + batch_size);
+        D(i64_to_string(chunk.count));
         bulk_fetch_messages(arena, chunk, token, email_dir);
         print("Fetching chunk (%d, %d)...\n", i, i+batch_size);
 
