@@ -75,9 +75,60 @@ u8 date_month_from_string(String mon)
     return 0;
 }
 
+i32 days_in_month(i32 mon, i32 year)
+{
+    static const i32 d[] = {0,31,28,31,30,31,30,31,31,30,31,30,31};
+    if (mon == 2)
+    {
+        int leap = (year % 4 == 0) && (year % 100 != 0 || year % 400 == 0);
+        return 28 + leap;
+    }
+    return d[mon];
+}
+
+void date_time_shift_minutes(Date_Time *dt, int offset_mins)
+{
+    int total_mins = dt->hour * 60 + dt->min + offset_mins;
+
+    int day_delta = 0;
+    if      (total_mins <    0) { total_mins += 1440; day_delta = -1; }
+    else if (total_mins >= 1440) { total_mins -= 1440; day_delta = +1; }
+
+    dt->hour = total_mins / 60;
+    dt->min  = total_mins % 60;
+
+    int day = dt->day + day_delta;
+    int mon = dt->mon;
+    int year = dt->year;
+
+    if (day < 1)
+    {
+        if (--mon < 1) { mon = 12; year--; }
+        day = days_in_month(mon, year);
+    }
+    else if (day > days_in_month(mon, year))
+    {
+        day = 1;
+        if (++mon > 12) { mon = 1; year++; }
+    }
+
+    dt->day  = day;
+    dt->mon  = mon;
+    dt->year = year;
+}
+
+void date_time_local_to_utc(Date_Time *date, i32 utc_offset_mins)
+{
+    date_time_shift_minutes(date, -utc_offset_mins);
+}
+
+void date_time_utc_to_local(Date_Time *date, i32 utc_offset_mins)
+{
+    date_time_shift_minutes(date, utc_offset_mins);
+}
+
 Date_Time parse_email_date(String date)
 {
-    D(date);
     Date_Time result = {0};
 
     // Skip optional day of week
@@ -95,6 +146,7 @@ Date_Time parse_email_date(String date)
     }
 
     date = string_trim_whitespace(date);
+    // D(date);
 
     // Now we should have a string that looks like this:
     // 19 Oct 2011 22:39:55 -0400
@@ -129,7 +181,7 @@ Date_Time parse_email_date(String date)
 
     // D(date_part); D(time_part); D(tz_part);
 
-    // date part
+    // date part (DD MMM YYYY)
     {
         i64 s1 = string_find(date_part, S(" "), 0, 0);
         i64 s2 = string_find(date_part, S(" "), s1+1, 0);
@@ -145,7 +197,7 @@ Date_Time parse_email_date(String date)
         // D(i64_to_string(result.day)); D(i64_to_string(result.mon)); D(i64_to_string(result.year));
     }
 
-    // time part
+    // time part (HH:MM:SS)
     {
         i64 c1 = string_find(time_part, S(":"), 0, 0);
         i64 c2 = string_find(time_part, S(":"), c1+1, 0);
@@ -160,13 +212,37 @@ Date_Time parse_email_date(String date)
         // D(i64_to_string(result.hour)); D(i64_to_string(result.min)); D(i64_to_string(result.sec));
     }
 
-    // tz part
+    // tz part (+/- HHMM)
+    i64 utc_offset_mins = 0;
     {
+        i64 dir = 1;
+        if (tz_part.data[0] == '-')
+        {
+            dir = -1;
+            tz_part = string_skip(tz_part, 1);
+        }
+        if (tz_part.data[0] == '+')
+        {
+            tz_part = string_skip(tz_part, 1);
+        }
+
+        tz_part = string_trim_whitespace(tz_part);
+
+        i64 hh = string_to_i64(string_slice(tz_part, 0, 2), 10);
+        i64 mm = string_to_i64(string_slice(tz_part, 2, 4), 10);
+        utc_offset_mins = dir * (hh * 60 + mm);
+        // D(i64_to_string(utc_offset_mins));
     }
 
-    // @Incomplete: convert date time to dense time, then apply tz adjustment, then convert back
+    // Convert to UTC time
+    date_time_local_to_utc(&result, utc_offset_mins);
 
     return result;
+}
+
+String date_time_to_sql_date(Date_Time date)
+{
+    return sprint("%04d-%02d-%02d", date.year, date.mon, date.day);
 }
 
 Platform_HTTP_Response auth_get(Arena *arena, String url, String token)
@@ -340,8 +416,9 @@ void process_message(Arena *arena, String json, String email_dir)
         S("Reply-To"),
     };
 
-    String date = json_get_header_value(headers, S("Date"));
-    parse_email_date(date);
+    String raw_date = json_get_header_value(headers, S("Date"));
+    Date_Time parsed_date = parse_email_date(raw_date);
+    String date = date_time_to_sql_date(parsed_date);
 
     for (int i = 0; i < count_of(keys); i += 1)
     {
@@ -370,7 +447,7 @@ void process_message(Arena *arena, String json, String email_dir)
         sb_push(arena, &sb, S("\n-->\n"));
     }
 
-    String name = sprint("%.*s.md", LIT(id));
+    String name = sprint("%.*s_%.*s.md", LIT(date), LIT(id));
     String contents = sb_to_string(arena, sb);
     os_write_entire_file(path_join(email_dir, name), contents);
 }
@@ -527,8 +604,7 @@ void app_run()
     for (i64 i = 0; i < all_ids.count; i += 1)
     {
         String id = all_ids.data[i];
-        String name = sprint("%.*s.md", LIT(id));
-        if (!string_array_contains(files, name))
+        if (!string_array_any_includes(files, id))
         {
             array_push(arena, &ids, id);
         }
