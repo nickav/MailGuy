@@ -245,7 +245,7 @@ String date_time_to_sql_date(Date_Time date)
     return sprint("%04d-%02d-%02d", date.year, date.mon, date.day);
 }
 
-Platform_HTTP_Response auth_get(Arena *arena, String url, String token)
+HTTP_Response auth_get(Arena *arena, String url, String token)
 {
     String headers = string_print(arena, "Authorization: Bearer %.*s\r\nAccept: application/json", LIT(token));
     return platform__http_get(arena, url, headers);
@@ -258,7 +258,7 @@ String_Array fetch_message_ids(Arena *arena, String token, i64 n)
     while (true)
     {
         i64 count = n > 0 ? Min(n, 500) : 500;
-        Platform_HTTP_Response resp = auth_get(arena, sprint("https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=%d&includeSpamTrash=1&pageToken=%.*s", count, LIT(page_token)), token);
+        HTTP_Response resp = auth_get(arena, sprint("https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=%d&includeSpamTrash=1&pageToken=%.*s", count, LIT(page_token)), token);
         if (resp.status != 200) break;
 
         JSON_Element *json = json_parse(arena, resp.body);
@@ -288,7 +288,7 @@ String_Array fetch_message_ids(Arena *arena, String token, i64 n)
 
 // JSON_Element *get_user_profile(String token)
 // {
-//     Platform_HTTP_Response resp = auth_get(arena, sprint("https://gmail.googleapis.com/gmail/v1/users/me/profile", token);
+//     HTTP_Response resp = auth_get(arena, sprint("https://gmail.googleapis.com/gmail/v1/users/me/profile", token);
 // }
 /*
 {
@@ -301,7 +301,7 @@ String_Array fetch_message_ids(Arena *arena, String token, i64 n)
 
 JSON_Element *fetch_user_profile(Arena *arena, String token)
 {
-    Platform_HTTP_Response resp = auth_get(arena, S("https://gmail.googleapis.com/gmail/v1/users/me/profile"), token);
+    HTTP_Response resp = auth_get(arena, S("https://gmail.googleapis.com/gmail/v1/users/me/profile"), token);
     D(resp.body);
     if (resp.status != 200) return 0;
     return json_parse(arena, resp.body);
@@ -310,7 +310,7 @@ JSON_Element *fetch_user_profile(Arena *arena, String token)
 void fetch_history(Arena *arena, String history_id, String token)
 {
     String url = sprint("https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId=%.*s&historyTypes=messageAdded&historyTypes=messageDeleted", LIT(history_id));
-    Platform_HTTP_Response resp = auth_get(arena, url, token);
+    HTTP_Response resp = auth_get(arena, url, token);
     D(resp.body);
     D(i64_to_string(resp.status));
 }
@@ -379,10 +379,11 @@ String json_get_header_value(JSON_Element *arr, String key)
     return result;
 }
 
-void process_message(Arena *arena, String json, String email_dir)
+void save_message(Arena *arena, String json, String email_dir)
 {
     JSON_Element *root = json_parse(arena, json);
     if (!root) return;
+    // D(json);
 
     String id = json_get(String, root, S("id"));
     if (!id.count)
@@ -468,7 +469,7 @@ void bulk_fetch_messages(Arena *arena, String_Array ids, String token, String em
     array_push(arena, &bodies, S("\r\n--batch_boundary--"));
 
     String body = string_concat_array(arena, bodies.data, bodies.count);
-    Platform_HTTP_Response resp = platform__http_post(arena, S("https://www.googleapis.com/batch/gmail/v1"), body, headers);
+    HTTP_Response resp = platform__http_post(arena, S("https://www.googleapis.com/batch/gmail/v1"), body, headers);
 
 
     String at = resp.body;
@@ -488,7 +489,7 @@ void bulk_fetch_messages(Arena *arena, String_Array ids, String token, String em
         {
             if (status == 200)
             {
-                process_message(arena, part, email_dir);
+                save_message(arena, part, email_dir);
             }
             else
             {
@@ -501,11 +502,44 @@ void bulk_fetch_messages(Arena *arena, String_Array ids, String token, String em
     }
 }
 
+
+void app_menu(i32 x, i32 y)
+{
+    Arena *arena = temp_arena();
+
+    MenuItem menu = {0};
+    menu_push(arena, &menu, (MenuItem){ .id = 1, .name = S("Say Hello!") });
+    menu_push(arena, &menu, (MenuItem){ .id = 2, .name = S("Exit") });
+    
+    i64 result = platform__show_menu(menu.subitems.data, menu.subitems.count, x, y);
+
+    switch (result)
+    {
+        case 1:
+        {
+            MessageBoxW(NULL, L"Hello!", L"Hi", MB_OK);
+        } break;
+
+        case 2:
+        {
+            platform__quit();
+        } break;
+    }
+}
+
 void app_run()
 {
     Arena *arena = arena_alloc(Gigabytes(1));
 
+    String app_data = path_join(os_get_system_path(arena, SystemPath_AppData), S("MailGuy"));
+    if (!os_file_exists(app_data))
+    {
+        assert(os_make_directory(app_data));
+    }
+
     String exe_dir = os_get_current_path();
+
+    // @Incomplete: make this a setting?
     String project_dir = path_dirname(exe_dir);
     String email_dir = path_join(project_dir, S("emails"));
     String attachments_dir = path_join(email_dir, S("attachements"));
@@ -513,8 +547,11 @@ void app_run()
     assert(os_make_directory_recursive(email_dir));
     assert(os_make_directory_recursive(attachments_dir));
 
-    String secrets_path = path_join(project_dir, S("client_secret.json"));
-    String token_path = path_join(project_dir, S("token.json"));
+    String secrets_path = path_join(app_data, S("client_secret.json"));
+    String token_path = path_join(app_data, S("token.json"));
+
+    if (!os_file_exists(secrets_path)) { secrets_path = path_join(exe_dir, S("client_secret.json")); }
+    if (!os_file_exists(token_path)) { token_path = path_join(exe_dir, S("token.json")); }
 
     if (!os_file_exists(secrets_path))
     {
@@ -569,7 +606,7 @@ void app_run()
     }
     D(token);
 
-    Platform_HTTP_Response resp = auth_get(arena, S("https://gmail.googleapis.com/gmail/v1/users/me/labels"), token);
+    HTTP_Response resp = auth_get(arena, S("https://gmail.googleapis.com/gmail/v1/users/me/labels"), token);
     if (resp.status == 401)
     {
         os_delete_file(token_path);
@@ -633,4 +670,12 @@ void app_run()
 
     print("Fetched %d emails\n", ids.count);
     print("Done! Took %.2fms\n", os_time() * 1000.0);
+}
+
+void app_tick()
+{
+}
+
+void app_quit()
+{
 }

@@ -13,12 +13,14 @@
 #include <fcntl.h>
 #include <curl/curl.h>
 
-typedef struct Platform_HTTP_Response Platform_HTTP_Response;
-struct Platform_HTTP_Response
+#include "platform.h"
+
+typedef struct MacOS_Platform_HTTP MacOS_Platform_HTTP;
+struct MacOS_Platform_HTTP
 {
-    i64    status;
-    String body;
-    String headers;
+    int server;
+    int client;
+    b32 is_open;
 };
 
 typedef struct Curl__Buf Curl__Buf;
@@ -60,7 +62,7 @@ static struct curl_slist *curl__headers_from_string(M_Temp *scratch, String head
     return list;
 }
 
-function Platform_HTTP_Response platform__http_get(Arena *arena, String url, String headers)
+function HTTP_Response platform__http_get(Arena *arena, String url, String headers)
 {
     M_Temp scratch = GetScratch(&arena, 1);
 
@@ -95,14 +97,14 @@ function Platform_HTTP_Response platform__http_get(Arena *arena, String url, Str
     curl_easy_cleanup(curl);
     ReleaseScratch(scratch);
 
-    Platform_HTTP_Response resp = {0};
+    HTTP_Response resp = {0};
     resp.status  = status;
     resp.body    = body_buf.data;
     resp.headers = hdrs_buf.data;
     return resp;
 }
 
-function Platform_HTTP_Response platform__http_post(Arena *arena, String url, String body, String headers)
+function HTTP_Response platform__http_post(Arena *arena, String url, String body, String headers)
 {
     M_Temp scratch = GetScratch(&arena, 1);
 
@@ -139,30 +141,16 @@ function Platform_HTTP_Response platform__http_post(Arena *arena, String url, St
     curl_easy_cleanup(curl);
     ReleaseScratch(scratch);
 
-    Platform_HTTP_Response resp = {0};
+    HTTP_Response resp = {0};
     resp.status  = status;
     resp.body    = body_buf.data;
     resp.headers = hdrs_buf.data;
     return resp;
 }
 
-typedef struct Mac_Platform_HTTP Mac_Platform_HTTP;
-struct Mac_Platform_HTTP
-{
-    int server;
-    int client;
-    b32 is_open;
-};
-
-typedef struct Platform_Handle Platform_Handle;
-struct Platform_Handle
-{
-    void *handle;
-};
-
 function Platform_Handle platform__http_server_open(Arena *arena, u16 *port)
 {
-    Mac_Platform_HTTP *http = PushStruct(arena, Mac_Platform_HTTP);
+    MacOS_Platform_HTTP *http = PushStruct(arena, MacOS_Platform_HTTP);
     http->server = socket(AF_INET, SOCK_STREAM, 0);
     http->client = -1;
 
@@ -190,7 +178,7 @@ function Platform_Handle platform__http_server_open(Arena *arena, u16 *port)
 
 function String platform__http_server_pump(Arena *arena, Platform_Handle handle)
 {
-    Mac_Platform_HTTP *http = (Mac_Platform_HTTP *)handle.handle;
+    MacOS_Platform_HTTP *http = (MacOS_Platform_HTTP *)handle.handle;
     if (!http || !http->is_open) return S("");
 
     http->client = accept(http->server, NULL, NULL);
@@ -224,7 +212,7 @@ function String platform__http_server_pump(Arena *arena, Platform_Handle handle)
 
 function void platform__http_server_close(Platform_Handle handle)
 {
-    Mac_Platform_HTTP *http = (Mac_Platform_HTTP *)handle.handle;
+    MacOS_Platform_HTTP *http = (MacOS_Platform_HTTP *)handle.handle;
     if (!http) return;
 
     if (http->client >= 0) close(http->client);
@@ -273,7 +261,7 @@ function String platform__get_google_token(Arena *arena, String client_id, Strin
         "&redirect_uri=http://localhost:%d",
         LIT(code), LIT(client_id), LIT(client_secret), port);
 
-    Platform_HTTP_Response response = platform__http_post(arena, S("https://oauth2.googleapis.com/token"), body, S("Content-Type: application/x-www-form-urlencoded"));
+    HTTP_Response response = platform__http_post(arena, S("https://oauth2.googleapis.com/token"), body, S("Content-Type: application/x-www-form-urlencoded"));
     return response.body;
 }
 
@@ -290,7 +278,7 @@ function String platform__refresh_google_token(Arena *arena, String client_id, S
         "&client_secret=%.*s",
         LIT(refresh_token), LIT(client_id), LIT(client_secret));
 
-    Platform_HTTP_Response resp = platform__http_post(arena, S("https://oauth2.googleapis.com/token"), body, S("Content-Type: application/x-www-form-urlencoded"));
+    HTTP_Response resp = platform__http_post(arena, S("https://oauth2.googleapis.com/token"), body, S("Content-Type: application/x-www-form-urlencoded"));
     return resp.body;
 }
 

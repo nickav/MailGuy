@@ -11,15 +11,26 @@
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "ws2_32.lib")
 
-typedef struct Platform_HTTP_Response Platform_HTTP_Response;
-struct Platform_HTTP_Response
+#include <shellapi.h>
+
+static NOTIFYICONDATAW g_nid = {0};
+static bool g_is_running = true;
+static HWND g_hwnd = NULL;
+
+#define IDI_MYICON 101
+#define WM_TRAY (WM_USER + 1)
+
+#include "platform.h"
+
+typedef struct Win32_Platform_HTTP Win32_Platform_HTTP;
+struct Win32_Platform_HTTP
 {
-    i64 status;
-    String body;
-    String headers;
+    SOCKET server;
+    SOCKET client;
+    b32    is_open;
 };
 
-function Platform_HTTP_Response platform__http_get(Arena *arena, String url, String headers)
+function HTTP_Response platform__http_get(Arena *arena, String url, String headers)
 {
     bool is_https = string_starts_with(url, S("https://"));
     DWORD port = is_https ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
@@ -86,14 +97,14 @@ function Platform_HTTP_Response platform__http_get(Arena *arena, String url, Str
     WinHttpCloseHandle(session);
     ReleaseScratch(scratch);
 
-    Platform_HTTP_Response resp = {0};
+    HTTP_Response resp = {0};
     resp.status = status;
     resp.body = result;
     resp.headers = resp_headers;
     return resp;
 }
 
-function Platform_HTTP_Response platform__http_post(Arena *arena, String url, String body, String headers)
+function HTTP_Response platform__http_post(Arena *arena, String url, String body, String headers)
 {
     bool is_https = string_starts_with(url, S("https://"));
     DWORD port = is_https ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
@@ -159,26 +170,12 @@ function Platform_HTTP_Response platform__http_post(Arena *arena, String url, St
     WinHttpCloseHandle(session);
     ReleaseScratch(scratch);
 
-    Platform_HTTP_Response resp = {0};
+    HTTP_Response resp = {0};
     resp.status = status;
     resp.body = result;
     resp.headers = resp_headers;
     return resp;
 }
-
-typedef struct Win32_Platform_HTTP Win32_Platform_HTTP;
-struct Win32_Platform_HTTP
-{
-    SOCKET server;
-    SOCKET client;
-    b32    is_open;
-};
-
-typedef struct Platform_Handle Platform_Handle;
-struct Platform_Handle
-{
-    void *handle;
-};
 
 function Platform_Handle platform__http_server_open(Arena *arena, u16 *port)
 {
@@ -294,7 +291,7 @@ function String platform__get_google_token(Arena *arena, String client_id, Strin
         "&redirect_uri=http://localhost:%d",
         LIT(code), LIT(client_id), LIT(client_secret), port);
 
-    Platform_HTTP_Response response = platform__http_post(arena, S("https://oauth2.googleapis.com/token"), body, S("Content-Type: application/x-www-form-urlencoded"));
+    HTTP_Response response = platform__http_post(arena, S("https://oauth2.googleapis.com/token"), body, S("Content-Type: application/x-www-form-urlencoded"));
     return response.body;
 }
 
@@ -311,11 +308,110 @@ function String platform__refresh_google_token(Arena *arena, String client_id, S
         "&client_secret=%.*s",
         LIT(refresh_token), LIT(client_id), LIT(client_secret));
 
-    Platform_HTTP_Response resp = platform__http_post(arena, S("https://oauth2.googleapis.com/token"), body, S("Content-Type: application/x-www-form-urlencoded"));
+    HTTP_Response resp = platform__http_post(arena, S("https://oauth2.googleapis.com/token"), body, S("Content-Type: application/x-www-form-urlencoded"));
     return resp.body;
 }
 
+static HMENU win32__menu_build(Arena *arena, MenuItem *items, u64 count)
+{
+    HMENU hmenu = CreatePopupMenu();
+
+    for (u64 i = 0; i < count; i++)
+    {
+        MenuItem *it = &items[i];
+
+        if (it->hidden) continue;
+
+        if (it->separator)
+        {
+            AppendMenuW(hmenu, MF_SEPARATOR, 0, NULL);
+            continue;
+        }
+
+        String label = it->name;
+        if (it->shortcut.count > 0)
+        {
+            label = sprint("%.*s\t%.*s", LIT(it->name), LIT(it->shortcut));
+        }
+
+        String16 label16 = string16_from_string(arena, label);
+        if (it->subitems.data && it->subitems.count > 0)
+        {
+            HMENU submenu = win32__menu_build(arena, it->subitems.data, it->subitems.count);
+
+            UINT flags = MF_POPUP | MF_STRING;
+            if (it->disabled) flags |= MF_GRAYED;
+            AppendMenuW(hmenu, flags, (UINT_PTR)submenu, (LPCWSTR)label16.data);
+        }
+        else
+        {
+            MENUITEMINFOW info = {0};
+            info.cbSize    = sizeof(info);
+            info.fMask     = MIIM_FTYPE | MIIM_STATE | MIIM_ID | MIIM_STRING;
+            info.fType     = it->radio ? (MFT_RADIOCHECK | MFT_STRING) : MFT_STRING;
+            info.fState    = MFS_ENABLED;
+            info.wID       = (UINT)(it->id + 1);
+            info.dwTypeData = (LPWSTR)label16.data;
+
+            if (it->checked)  info.fState |= MFS_CHECKED;
+            if (it->disabled) info.fState |= MFS_DISABLED;
+
+            InsertMenuItemW(hmenu, GetMenuItemCount(hmenu), TRUE, &info);
+        }
+    }
+
+    return hmenu;
+}
+
+function i64 platform__show_menu(MenuItem *items, u64 count, i32 x, i32 y)
+{
+    M_Temp scratch = GetScratch(0, 0);
+    HMENU hmenu = win32__menu_build(scratch.arena, items, count);
+
+    UINT flags = TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY;
+    SetForegroundWindow(g_hwnd);
+    i64 result = (u32)TrackPopupMenuEx(hmenu, flags, x, y, g_hwnd, NULL);
+    result -= 1;
+
+    DestroyMenu(hmenu);
+    ReleaseScratch(scratch);
+    return result;
+}
+
+function void platform__quit()
+{
+    if (g_is_running)
+    {
+        Shell_NotifyIconW(NIM_DELETE, &g_nid);
+        g_is_running = false;
+    }
+}
+
 #include "app.c"
+
+LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+        case WM_TRAY:
+        {
+            if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP)
+            {
+                POINT pt;
+                GetCursorPos(&pt);
+                app_menu(pt.x, pt.y);
+            }
+
+            return 0;
+        } break;
+
+        case WM_DESTROY:
+        {
+            platform__quit();
+            return 0;
+        } break;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
 {
@@ -323,7 +419,60 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     WSAStartup(MAKEWORD(2, 2), &wsa);
 
     os_init();
+
+    // NOTE(nick): Set DPI Awareness
+    {
+        HMODULE user32 = LoadLibraryA("user32.dll");
+
+        typedef BOOL Win32_SetProcessDpiAwarenessContext(HANDLE);
+        typedef BOOL Win32_SetProcessDpiAwareness(int);
+
+        Win32_SetProcessDpiAwarenessContext *SetProcessDpiAwarenessContext = (Win32_SetProcessDpiAwarenessContext *) GetProcAddress(user32, "SetProcessDpiAwarenessContext");
+        Win32_SetProcessDpiAwareness *SetProcessDpiAwareness = (Win32_SetProcessDpiAwareness *) GetProcAddress(user32, "SetProcessDpiAwareness");
+
+        if (SetProcessDpiAwarenessContext) {
+            SetProcessDpiAwarenessContext(((HANDLE) -4) /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 */);
+        } else if (SetProcessDpiAwareness) {
+            SetProcessDpiAwareness(1 /* PROCESS_SYSTEM_DPI_AWARE */);
+        } else {
+            SetProcessDPIAware();
+        }
+    }
+
     app_run();
+
+    WNDCLASSW wc = {0};
+    wc.lpfnWndProc   = WndProc;
+    wc.hInstance     = hInst;
+    wc.lpszClassName = L"MailGuyTray";
+    RegisterClassW(&wc);
+
+    g_hwnd = CreateWindowExW(0, L"MailGuyTray", L"MailGuyTray", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInst, NULL);
+
+    g_nid.cbSize           = sizeof(g_nid);
+    g_nid.hWnd             = g_hwnd;
+    g_nid.uID              = 1;
+    g_nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uCallbackMessage = WM_TRAY;
+    g_nid.hIcon            = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);
+    // g_nid.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_MYICON));
+    lstrcpyW(g_nid.szTip, L"Mail Guy");
+    Shell_NotifyIconW(NIM_ADD, &g_nid);
+
+    while (g_is_running)
+    {
+        MSG msg;
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+        {
+            if (msg.message == WM_QUIT) return (int)msg.wParam;
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        app_tick();
+        Sleep(16);
+    }
+
+    app_quit();
 
     WSACleanup();
     return 0;
