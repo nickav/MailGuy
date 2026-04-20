@@ -266,12 +266,8 @@ function String platform__get_google_token(Arena *arena, String client_id, Strin
     return response.body;
 }
 
-function String platform__refresh_google_token(Arena *arena, String client_id, String client_secret, String token)
+function String platform__refresh_google_token(Arena *arena, String client_id, String client_secret, String refresh_token)
 {
-    JSON_Element *root = json_parse(arena, token);
-    if (!root) return S("");
-    String refresh_token = json_to_string(json_find(root, S("refresh_token")));
-
     String body = string_print(arena,
         "grant_type=refresh_token"
         "&refresh_token=%.*s"
@@ -423,7 +419,7 @@ int main(int argc, char **argv)
 
     // NOTE(nick): run in another thread so the tray icon can be interactive...
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        app_run();
+        app_init();
     });
 
     NSDate *past = [NSDate distantPast];

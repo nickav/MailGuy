@@ -295,12 +295,8 @@ function String platform__get_google_token(Arena *arena, String client_id, Strin
     return response.body;
 }
 
-function String platform__refresh_google_token(Arena *arena, String client_id, String client_secret, String token)
+function String platform__refresh_google_token(Arena *arena, String client_id, String client_secret, String refresh_token)
 {
-    JSON_Element *root = json_parse(arena, token);
-    if (!root) return S("");
-    String refresh_token = json_to_string(json_find(root, S("refresh_token")));
-
     String body = string_print(arena,
         "grant_type=refresh_token"
         "&refresh_token=%.*s"
@@ -439,7 +435,21 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
         }
     }
 
-    app_run();
+    // NOTE(nick): Set Dark Mode Awareness
+    {
+        typedef DWORD WINAPI Win32_SetPreferredAppMode(DWORD);
+        HMODULE uxtheme = LoadLibraryExA("uxtheme.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (uxtheme)
+        {
+            Win32_SetPreferredAppMode *SetPreferredAppMode = (Win32_SetPreferredAppMode *)GetProcAddress(uxtheme, MAKEINTRESOURCEA(135));
+            if (SetPreferredAppMode)
+            {
+                SetPreferredAppMode(1);
+            }
+        }
+    }
+
+    app_init();
 
     WNDCLASSW wc = {0};
     wc.lpfnWndProc   = WndProc;
@@ -459,6 +469,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     lstrcpyW(g_nid.szTip, L"Mail Guy");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
+
+    f64 then = os_time();
     while (g_is_running)
     {
         MSG msg;
@@ -468,7 +480,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        app_tick();
+
+        f64 now = os_time();
+        f64 dt = now - then;
+        then = now;
+
+        app_tick(dt);
+
         Sleep(16);
     }
 

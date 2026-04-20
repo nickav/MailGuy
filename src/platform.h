@@ -51,7 +51,8 @@ function i64 platform__show_menu(MenuItem *items, u64 count, i32 x, i32 y);
 
 function void platform__quit();
 
-void menu_push(Arena *arena, MenuItem *parent, MenuItem item)
+MenuItem *menu_push(Arena *arena, MenuItem *parent, MenuItem item)
 {
     array_push(arena, &parent->subitems, item);
+    return array_peek(&parent->subitems);
 }

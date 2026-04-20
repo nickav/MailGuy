@@ -1,5 +1,3 @@
-static i64 batch_size = 25;
-
 void D_(String label, String x)
 {
     print("%.*s = %.*s\n", LIT(label), LIT(x));
@@ -245,6 +243,22 @@ String date_time_to_sql_date(Date_Time date)
     return sprint("%04d-%02d-%02d", date.year, date.mon, date.day);
 }
 
+function String time_ago(f64 now, f64 then)
+{
+    f64 diff = now - then;
+
+    if (diff < 5) return S("Just now");
+    if (diff < 60) return sprint("%d seconds ago", (i32)diff);
+    if (diff < 120) return S("1 minute ago");
+    if (diff < 3600) return sprint("%d minutes ago", (i32)(diff / 60));
+    if (diff < 7200) return S("1 hour ago");
+    if (diff < 86400) return sprint("%d hours ago", (i32)(diff / 3600));
+    if (diff < 172800) return S("last checked yesterday");
+
+    return sprint("%d days ago", (i32)(diff / 86400));
+}
+
+
 HTTP_Response auth_get(Arena *arena, String url, String token)
 {
     String headers = string_print(arena, "Authorization: Bearer %.*s\r\nAccept: application/json", LIT(token));
@@ -285,19 +299,6 @@ String_Array fetch_message_ids(Arena *arena, String token, i64 n)
 
     return result;
 }
-
-// JSON_Element *get_user_profile(String token)
-// {
-//     HTTP_Response resp = auth_get(arena, sprint("https://gmail.googleapis.com/gmail/v1/users/me/profile", token);
-// }
-/*
-{
-  "emailAddress": "user@gmail.com",
-  "messagesTotal": 1234,
-  "threadsTotal": 567,
-  "historyId": "12345"
-}
-*/
 
 JSON_Element *fetch_user_profile(Arena *arena, String token)
 {
@@ -379,8 +380,10 @@ String json_get_header_value(JSON_Element *arr, String key)
     return result;
 }
 
-void save_message(Arena *arena, String json, String email_dir)
+void save_message(Arena *temp, String json, String email_dir)
 {
+    Arena *arena = temp;
+
     JSON_Element *root = json_parse(arena, json);
     if (!root) return;
     // D(json);
@@ -489,7 +492,9 @@ void bulk_fetch_messages(Arena *arena, String_Array ids, String token, String em
         {
             if (status == 200)
             {
+                M_Temp temp = arena_begin_temp(arena);
                 save_message(arena, part, email_dir);
+                arena_end_temp(temp);
             }
             else
             {
@@ -502,14 +507,52 @@ void bulk_fetch_messages(Arena *arena, String_Array ids, String token, String em
     }
 }
 
+static struct {
+    Arena *persist_arena;
+    Arena *frame_arena;
+
+    String app_data;
+
+    String client_id;
+    String client_secret;
+
+    String email_dir;
+    String refresh_path;
+
+    i32 batch_size;
+    i32 update_every_mins;
+
+    String email;
+
+    f64 last_run;
+} g_app = {0};
+
+void app_run();
 
 void app_menu(i32 x, i32 y)
 {
     Arena *arena = temp_arena();
 
+    String last_checked = string_concat(S("Last checked: "), time_ago(os_time(), g_app.last_run));
+
     MenuItem menu = {0};
-    menu_push(arena, &menu, (MenuItem){ .id = 1, .name = S("Say Hello!") });
-    menu_push(arena, &menu, (MenuItem){ .id = 2, .name = S("Exit") });
+    menu_push(arena, &menu, (MenuItem){ .disabled = true, .name = g_app.email });
+    menu_push(arena, &menu, (MenuItem){ .separator = true });
+    menu_push(arena, &menu, (MenuItem){ .id = 1, .name = S("Check Now") });
+    menu_push(arena, &menu, (MenuItem){ .disabled = true, .name = last_checked });
+    
+    MenuItem *refresh_menu = menu_push(arena, &menu, (MenuItem){ .id = 10, .name = S("Refresh Interval") });
+        menu_push(arena, refresh_menu, (MenuItem){ .id = 11, .name = S("5 Minutes"), .checked = true });
+        menu_push(arena, refresh_menu, (MenuItem){ .id = 12, .name = S("10 Minutes"), .disabled = true });
+        menu_push(arena, refresh_menu, (MenuItem){ .id = 13, .name = S("15 Minutes"), .disabled = true });
+
+    bool exists = os_file_exists(g_app.refresh_path);
+    if (exists)
+    {
+        menu_push(arena, &menu, (MenuItem){ .id = 3, .name = S("Sign-out") });
+    }
+
+    menu_push(arena, &menu, (MenuItem){ .id = 2, .name = S("Quit") });
     
     i64 result = platform__show_menu(menu.subitems.data, menu.subitems.count, x, y);
 
@@ -517,45 +560,49 @@ void app_menu(i32 x, i32 y)
     {
         case 1:
         {
-            // MessageBoxW(NULL, L"Hello!", L"Hi", MB_OK);
+            app_run();
         } break;
 
         case 2:
         {
             platform__quit();
         } break;
+
+        case 3:
+        {
+            os_delete_file(g_app.refresh_path);
+        } break;
     }
 }
 
-void app_run()
+void app_init()
 {
-    Arena *arena = arena_alloc(Gigabytes(1));
+    g_app.persist_arena = arena_alloc(Gigabytes(1));
+    g_app.frame_arena = arena_alloc(Gigabytes(1));
+
+    Arena *arena = g_app.persist_arena;
 
     String app_data = path_join(os_get_system_path(arena, SystemPath_AppData), S("MailGuy"));
+    String exe_dir = os_get_system_path(arena, SystemPath_Binary);
+
     if (!os_file_exists(app_data))
     {
         assert(os_make_directory(app_data));
     }
+    g_app.app_data = string_push(arena, app_data);
 
-    String exe_dir = os_get_current_path();
+    String secrets_path1 = path_join(app_data, S("client_secret.json"));
+    String secrets_path2 = path_join(exe_dir, S("client_secret.json"));
 
-    // @Incomplete: make this a setting?
-    String project_dir = path_dirname(exe_dir);
-    String email_dir = path_join(project_dir, S("emails"));
-    String attachments_dir = path_join(email_dir, S("attachements"));
+    String secrets_path = secrets_path1;
+    if (!os_file_exists(secrets_path)) { secrets_path = secrets_path2; }
 
-    assert(os_make_directory_recursive(email_dir));
-    assert(os_make_directory_recursive(attachments_dir));
-
-    String secrets_path = path_join(app_data, S("client_secret.json"));
-    String token_path = path_join(app_data, S("token.json"));
-
-    if (!os_file_exists(secrets_path)) { secrets_path = path_join(exe_dir, S("client_secret.json")); }
-    if (!os_file_exists(token_path)) { token_path = path_join(exe_dir, S("token.json")); }
-
+    // Get secrets
     if (!os_file_exists(secrets_path))
     {
-        print("Missing client_secret.json! Expected at: %.*s\n", LIT(secrets_path));
+        print("Missing client_secret.json! Looked in:\n");
+        print("  - %.*s\n", LIT(secrets_path1));
+        print("  - %.*s\n", LIT(secrets_path2));
         return;
     }
 
@@ -571,30 +618,78 @@ void app_run()
     D(i64_to_string(json_child_count(xx)));
     String client_id = json_get(String, xx, S("client_id"));
     String client_secret = json_get(String, xx, S("client_secret"));
-    D(client_id);
-    D(client_secret);
+    g_app.client_id = string_push(arena, client_id);
+    g_app.client_secret = string_push(arena, client_secret);
 
-    String token_json = S("");
-    if (os_file_exists(token_path))
+    // @Incomplete: make this a setting?
+    String project_dir = path_dirname(exe_dir);
+    String email_dir = path_join(project_dir, S("emails"));
+
+    String refresh_path = path_join(app_data, S("refresh_token.txt"));
+
+    g_app.email_dir = string_push(arena, email_dir);
+    g_app.refresh_path = string_push(arena, refresh_path);
+    app_run();
+}
+
+void app_run()
+{
+    // @Incomplete: support multiple accounts...
+    Arena *arena = g_app.frame_arena;
+    String email_dir = g_app.email_dir;
+    String refresh_path = g_app.refresh_path;
+
+
+    String attachments_dir = path_join(email_dir, S("attachements"));
+
+    if (!os_make_directory_recursive(email_dir))
     {
-        token_json = os_read_entire_file(arena, token_path);
-        #if 0
-        token_json = platform__refresh_google_token(arena, client_id, client_secret, token_json);
-        D(token_json);
-        if (token_json.count)
-        {
-            os_write_entire_file(token_path, token_json);
-            print("Refreshed token!\n");
-        }
-        #endif
+        print("Failed to make email folder: %.*s\n", LIT(email_dir));
+        return;
     }
+
+    if (!os_make_directory_recursive(attachments_dir))
+    {
+        print("Failed to make attachements folder: %.*s\n", LIT(attachments_dir));
+        return;
+    }
+
+    // Get refresh token if we don't have one
+    String refresh_token = S("");
+    if (os_file_exists(refresh_path))
+    {
+        refresh_token = os_read_entire_file(arena, refresh_path);
+    }
+
+    String client_id = g_app.client_id;
+    String client_secret = g_app.client_secret;
+
+    if (!refresh_token.count)
+    {
+        String body = platform__get_google_token(arena, client_id, client_secret);
+        JSON_Element *root = json_parse(arena, body);
+        refresh_token = json_get(String, root, S("refresh_token"));
+
+        if (!refresh_token.count)
+        {
+            print("Failed to get refresh token!\n");
+            D(body);
+            return;
+        }
+
+        os_write_entire_file(refresh_path, refresh_token);
+    }
+
+    D(refresh_token);
+
+    String token_json = platform__refresh_google_token(arena, client_id, client_secret, refresh_token);
+    D(token_json);
     if (!token_json.count)
     {
-        token_json = platform__get_google_token(arena, client_id, client_secret);
-        os_write_entire_file(token_path, token_json);
+        os_delete_file(refresh_path);
+        print("Failed to get auth token using refresh token!\n");
+        return;
     }
-
-    D(token_json);
 
     String token = S("");
     {
@@ -609,7 +704,7 @@ void app_run()
     HTTP_Response resp = auth_get(arena, S("https://gmail.googleapis.com/gmail/v1/users/me/labels"), token);
     if (resp.status == 401)
     {
-        os_delete_file(token_path);
+        os_delete_file(refresh_path);
         print("Try again.\n");
         return;
     }
@@ -629,6 +724,11 @@ void app_run()
 
     print("Fetching profile...\n");
     JSON_Element *profile = fetch_user_profile(arena, token);
+    String email = json_get(String, profile, S("emailAddress"));
+    if (!string_equals(g_app.email, email))
+    {
+        g_app.email = string_push(g_app.persist_arena, email);
+    }
 
     print("Fetching ids...\n");
 
@@ -655,6 +755,7 @@ void app_run()
     print("Already cached: %d\n", (all_ids.count - ids.count));
     print("IDs to fetch: %d\n", ids.count);
 
+    i32 batch_size = g_app.batch_size;
     for (i64 i = 0; i < ids.count; i += batch_size)
     {
         String_Array chunk = array_slice(String_Array, ids, i, i + batch_size);
@@ -669,11 +770,23 @@ void app_run()
     }
 
     print("Fetched %d emails\n", ids.count);
-    print("Done! Took %.2fms\n", os_time() * 1000.0);
+    print("Run complete! Took %.2fms\n", os_time() * 1000.0);
+
+    g_app.last_run = os_time();
 }
 
-void app_tick()
+void app_tick(f32 dt)
 {
+    static f64 time = 0;
+    time += dt;
+
+    // @Hack: until we do a proper history api thing, this should suffice...
+    if (time >= 5 * 60)
+    {
+        time -= 5 * 60;
+
+        app_init();
+    }
 }
 
 void app_quit()
