@@ -409,6 +409,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+static BOOL WINAPI win32__console_ctrl_handler(DWORD type)
+{
+    platform__quit();
+    ExitProcess(0);
+    return TRUE;
+}
+
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
 {
     WSADATA wsa;
@@ -467,6 +474,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     lstrcpyW(g_nid.szTip, L"Mail Guy");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
+    SetConsoleCtrlHandler(win32__console_ctrl_handler, TRUE);
 
     app_init();
 

@@ -590,7 +590,7 @@ void save_message(Arena *temp, String json, String email_dir, String token, Stri
     String id = json_get(String, root, S("id"));
     if (!id.count)
     {
-        D(json);
+        print("Failed to save message with id: %.*s\n", LIT(id));
         return;
     }
 
@@ -682,20 +682,23 @@ void bulk_fetch_messages(Arena *arena, String_Array ids, String token, String em
     }
 
     HTTP_Response_Array responses = gmail_bulk_fetch_with_retry(arena, token, requests, 4, 5.0);
-    assert(responses.count == ids.count);
-    for (i64 index = 0; index < responses.count; index += 1)
+    if (responses.count > 0)
     {
-        HTTP_Response resp = responses.data[index];
-        if (resp.status == 200)
+        assert(responses.count == ids.count);
+        for (i64 index = 0; index < responses.count; index += 1)
         {
-            M_Temp temp = arena_begin_temp(arena);
-            save_message(arena, resp.body, email_dir, token, attachments_dir);
-            arena_end_temp(temp);
-        }
-        else
-        {
-            String id = ids.data[index];
-            print("Failed to fetch message id '%.*s' status %d\n", LIT(id), resp.status);
+            HTTP_Response resp = responses.data[index];
+            if (resp.status == 200)
+            {
+                M_Temp temp = arena_begin_temp(arena);
+                save_message(arena, resp.body, email_dir, token, attachments_dir);
+                arena_end_temp(temp);
+            }
+            else
+            {
+                String id = ids.data[index];
+                print("Failed to fetch message id '%.*s' status %d\n", LIT(id), resp.status);
+            }
         }
     }
 }
@@ -994,7 +997,7 @@ void app_run()
     {
         String_Array chunk = array_slice(String_Array, ids, i, i + batch_size);
         // D(i64_to_string(chunk.count));
-        print("  -> Fetching chunk (%d, %d)\n", i, i+batch_size);
+        print("  -> Fetching chunk (%d, %d)\n", i, i+chunk.count);
         bulk_fetch_messages(arena, chunk, token, email_dir, attachments_dir);
 
         if (i+batch_size < ids.count)
