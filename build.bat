@@ -3,7 +3,7 @@
 set project_root=%~dp0%
 
 rem set flags=/Od -Oi -Zo -Z7 -FC -Gm- -GR- /Zc:strictStrings-
-set flags=/Od -Oi -Zo -Z7 -FC -Gm- -GR- /Zc:strictStrings-
+set flags=/O2 -Oi -Zo -Z7 -FC -Gm- -GR- /Zc:strictStrings-
 set exe=MailGuy.exe
 
 pushd %project_root%
