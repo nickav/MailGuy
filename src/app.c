@@ -429,7 +429,6 @@ String_Array fetch_message_ids(Arena *arena, String token, i64 n)
 JSON_Element *fetch_user_profile(Arena *arena, String token)
 {
     HTTP_Response resp = auth_get(arena, S("https://gmail.googleapis.com/gmail/v1/users/me/profile"), token);
-    D(resp.body);
     if (resp.status != 200) return 0;
     return json_parse(arena, resp.body);
 }
@@ -844,7 +843,6 @@ void app_init()
     }
 
     JSON_Element *xx = json_find(root, S("installed"));
-    D(i64_to_string(json_child_count(xx)));
     String client_id = json_get(String, xx, S("client_id"));
     String client_secret = json_get(String, xx, S("client_secret"));
     g_app.client_id = string_push(arena, client_id);
@@ -864,6 +862,8 @@ void app_init()
 
 void app_run()
 {
+    f64 run_start_time = os_time();
+
     if (g_app.is_running)
     {
         return;
@@ -903,11 +903,10 @@ void app_run()
 
         os_write_entire_file(refresh_path, refresh_token);
     }
-
-    D(refresh_token);
+    // D(refresh_token);
 
     String token_json = platform__refresh_google_token(arena, client_id, client_secret, refresh_token);
-    D(token_json);
+    // D(token_json);
     if (!token_json.count)
     {
         os_delete_file(refresh_path);
@@ -924,7 +923,7 @@ void app_run()
             token = json_to_string(json_find(root, S("access_token")));
         }
     }
-    D(token);
+    // D(token);
 
     print("Fetching profile...\n");
     JSON_Element *profile = fetch_user_profile(arena, token);
@@ -933,6 +932,7 @@ void app_run()
     {
         g_app.email = string_push(g_app.persist_arena, email);
     }
+    D(g_app.email);
 
     #if 0
     HTTP_Response resp = auth_get(arena, S("https://gmail.googleapis.com/gmail/v1/users/me/labels"), token);
@@ -946,7 +946,6 @@ void app_run()
     // D(resp.body);
     #endif
 
-    print("Scanning directory...\n");
     String email_dir = path_join2(arena, parent_email_dir, path_sanitize(arena, email));
     String attachments_dir = path_join(email_dir, S("attachements"));
 
@@ -963,14 +962,16 @@ void app_run()
         return;
     }
 
+    print("Scanning directory...\n");
+
     String_Array files = os_scan_folder(arena, email_dir);
+    print("  -> Found %d file(s)\n", files.count);
+
     print("Fetching ids...\n");
-
     String_Array all_ids = fetch_message_ids(arena, token, g_app.fetch_count);
-    print("Total id count: %d\n", all_ids.count);
-    g_app.total_count = all_ids.count;
+    print("  -> Got %d id(s) from server\n", all_ids.count);
 
-    bool force = false;
+    g_app.total_count = all_ids.count;
 
     String_Array ids = {0};
     for (i64 i = 0; i < all_ids.count; i += 1)
@@ -983,21 +984,18 @@ void app_run()
     }
     g_app.cached_count = (all_ids.count - ids.count);
 
-    if (force)
-    {
-        ids = all_ids;
-    }
+    print("  -> Already cached: %d\n", (all_ids.count - ids.count));
+    print("  -> IDs to fetch: %d\n", ids.count);
 
-    print("Already cached: %d\n", (all_ids.count - ids.count));
-    print("IDs to fetch: %d\n", ids.count);
+    print("Batch downloading emails...\n");
 
     i32 batch_size = g_app.batch_size;
     for (i64 i = 0; i < ids.count; i += batch_size)
     {
         String_Array chunk = array_slice(String_Array, ids, i, i + batch_size);
         // D(i64_to_string(chunk.count));
+        print("  -> Fetching chunk (%d, %d)\n", i, i+batch_size);
         bulk_fetch_messages(arena, chunk, token, email_dir, attachments_dir);
-        print("Fetching chunk (%d, %d)...\n", i, i+batch_size);
 
         if (i+batch_size < ids.count)
         {
@@ -1005,9 +1003,9 @@ void app_run()
         }
     }
 
-    print("Fetched %d emails\n", ids.count);
-    print("Run complete! Took %.2fms\n", os_time() * 1000.0);
+    print("Run complete! Took %.2fms\n", (os_time() - run_start_time) * 1000.0);
 
+    i64 prev_cached_count = g_app.cached_count;
     // NOTE(nick); after a fetch, re-scan
     {
         files = os_scan_folder(arena, email_dir);
@@ -1022,6 +1020,8 @@ void app_run()
         }
         g_app.cached_count = (all_ids.count - ids.count);
     }
+
+    print("  -> Fetched %d new email(s)\n", (g_app.cached_count - prev_cached_count));
 
     g_app.last_run = os_time();
     g_app.is_running = false;
