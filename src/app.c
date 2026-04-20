@@ -762,11 +762,13 @@ void app_menu(i32 x, i32 y)
     menu_push(arena, &menu, (MenuItem){ .disabled = true, .name = last_checked });
     menu_push(arena, &menu, (MenuItem){ .disabled = true, .name = sprint("%d / %d downloaded", g_app.cached_count, g_app.total_count) });
     
-    MenuItem *refresh_menu = menu_push(arena, &menu, (MenuItem){ .id = 10, .name = S("Refresh Interval") });
+    MenuItem *refresh_menu = menu_push(arena, &menu, (MenuItem){ .id = 10, .name = S("Auto Refresh Interval") });
         menu_push(arena, refresh_menu, (MenuItem){ .id = 11, .name = S("1 Minute"),   .checked = g_app.refresh_interval_mins == 1 });
         menu_push(arena, refresh_menu, (MenuItem){ .id = 12, .name = S("5 Minutes"),  .checked = g_app.refresh_interval_mins == 5 });
-        menu_push(arena, refresh_menu, (MenuItem){ .id = 13, .name = S("10 Minutes"), .checked = g_app.refresh_interval_mins == 10 });
         menu_push(arena, refresh_menu, (MenuItem){ .id = 14, .name = S("15 Minutes"), .checked = g_app.refresh_interval_mins == 15 });
+        menu_push(arena, refresh_menu, (MenuItem){ .id = 15, .name = S("30 Minutes"), .checked = g_app.refresh_interval_mins == 30 });
+        menu_push(arena, refresh_menu, (MenuItem){ .id = 16, .name = S("1 Hour"),     .checked = g_app.refresh_interval_mins == 60 });
+        menu_push(arena, refresh_menu, (MenuItem){ .id = 17, .name = S("Manual"),     .checked = g_app.refresh_interval_mins == 0 });
 
     menu_push(arena, &menu, (MenuItem){ .id = 4, .name = S("Open Folder") });
 
@@ -807,6 +809,9 @@ void app_menu(i32 x, i32 y)
         case 12: { g_app.refresh_interval_mins = 5; }
         case 13: { g_app.refresh_interval_mins = 10; }
         case 14: { g_app.refresh_interval_mins = 15; }
+        case 15: { g_app.refresh_interval_mins = 30; }
+        case 16: { g_app.refresh_interval_mins = 60; }
+        case 17: { g_app.refresh_interval_mins = 0; }
     }
 }
 
@@ -1040,12 +1045,15 @@ void app_tick(f32 dt)
     time += dt;
 
     // @Hack: until we do a proper history api thing, this should suffice...
-    if (time >= 60 * g_app.refresh_interval_mins)
+    if (g_app.refresh_interval_mins > 0)
     {
-        time -= 60 * g_app.refresh_interval_mins;
+        if (time >= 60 * g_app.refresh_interval_mins)
+        {
+            time -= 60 * g_app.refresh_interval_mins;
 
-        app_run();
-        arena_reset(g_app.frame_arena);
+            app_run();
+            arena_reset(g_app.frame_arena);
+        }
     }
 }
 
