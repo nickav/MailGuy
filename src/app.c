@@ -1,3 +1,16 @@
+Struct(Attachment)
+{
+    String id;
+    String name;
+    String mime_type;
+};
+
+Struct(Attachment_Array)
+{
+    _ArrayHeader_;
+    Attachment *data;
+};
+
 void D_(String label, String x)
 {
     print("%.*s = %.*s\n", LIT(label), LIT(x));
@@ -247,15 +260,51 @@ function String time_ago(f64 now, f64 then)
 {
     f64 diff = now - then;
 
-    if (diff < 5) return S("Just now");
+    if (diff < 5) return S("just now");
     if (diff < 60) return sprint("%d seconds ago", (i32)diff);
     if (diff < 120) return S("1 minute ago");
     if (diff < 3600) return sprint("%d minutes ago", (i32)(diff / 60));
     if (diff < 7200) return S("1 hour ago");
     if (diff < 86400) return sprint("%d hours ago", (i32)(diff / 3600));
-    if (diff < 172800) return S("last checked yesterday");
+    if (diff < 172800) return S("yesterday");
 
     return sprint("%d days ago", (i32)(diff / 86400));
+}
+
+function String path_sanitize(Arena *arena, String str)
+{
+    str = string_trim_whitespace(str);
+
+    String result = string_push(arena, str);
+
+    for (i64 i = 0; i < result.count; i++)
+    {
+        u8 c = result.data[i];
+        if (
+            c == '/' || c == '\\' || c == ':' || c == '*' ||
+            c == '?' || c == '"'  || c == '<' || c == '>' ||
+            c == '|' || c == '\0' || c < 32
+        )
+        {
+            result.data[i] = '_';
+        }
+    }
+
+    return result;
+}
+
+String_Array os_scan_folder(Arena *arena, String folder)
+{
+    String_Array files = {0};
+    File_Lister *it = os_file_iter_begin(arena, folder);
+    File_Info info = {0};
+    while (os_file_iter_next(arena, it, &info))
+    {
+        if (string_starts_with(info.name, S("."))) continue;
+        String name = string_push(arena, info.name);
+        array_push(arena, &files, name);
+    }
+    return files;
 }
 
 
@@ -263,6 +312,83 @@ HTTP_Response auth_get(Arena *arena, String url, String token)
 {
     String headers = string_print(arena, "Authorization: Bearer %.*s\r\nAccept: application/json", LIT(token));
     return platform__http_get(arena, url, headers);
+}
+
+HTTP_Response_Array gmail_bulk_fetch(Arena *arena, String token, String_Array requests)
+{
+    assert(requests.count <= 100);
+
+    HTTP_Response_Array result = {0};
+    if (!requests.count) return result;
+
+    String headers = string_print(arena,
+        "Authorization: Bearer %.*s\r\nAccept: application/json\r\nContent-Type: multipart/mixed; boundary=\"batch_boundary\"",
+        LIT(token));
+
+    String_Array bodies = {0};
+    for (i64 i = 0; i < requests.count; i++)
+    {
+        String str = sprint("--batch_boundary\r\n\r\n%.*s\r\n", LIT(requests.data[i]));
+        array_push(arena, &bodies, str);
+    }
+    array_push(arena, &bodies, S("\r\n--batch_boundary--"));
+
+    String body = string_concat_array(arena, bodies.data, bodies.count);
+    HTTP_Response resp = platform__http_post(arena, S("https://www.googleapis.com/batch/gmail/v1"), body, headers);
+
+    String at = resp.body;
+    String part = string_split_iter(&at, S("HTTP/1.1 "));
+
+    while ((part = string_split_iter(&at, S("HTTP/1.1 "))), part.count > 0)
+    {
+        String status_str = string_slice(part, 0, string_index(part, S(" "), 0));
+
+        while (part.count > 0 && part.data[0] != '{') { string_advance(&part, 1); }
+        while (part.count > 0 && part.data[part.count-1] != '}') { part.count -= 1; }
+
+        HTTP_Response item = {
+            .status = string_to_i64(status_str, 10),
+            .body   = string_push(arena, part),
+        };
+        array_push(arena, &result, item);
+    }
+
+    return result;
+}
+
+HTTP_Response_Array gmail_bulk_fetch_with_retry(Arena *arena, String token, String_Array requests, i32 max_retries, f64 retry_sleep_secs)
+{
+    HTTP_Response_Array result = gmail_bulk_fetch(arena, token, requests);
+
+    for (i32 attempt = 0; attempt < max_retries; attempt++)
+    {
+        String_Array retry_requests = {0};
+        Array_i64    retry_indices  = {0};
+        for (i64 i = 0; i < result.count; i++)
+        {
+            if (result.data[i].status != 200)
+            {
+                array_push(arena, &retry_requests, requests.data[i]);
+                array_push(arena, &retry_indices,  i);
+            }
+        }
+
+        if (!retry_requests.count) break;
+
+        print("Retrying %d failed requests (attempt %d)...\n", retry_requests.count, attempt + 1);
+        if (retry_sleep_secs)
+        {
+            os_sleep(retry_sleep_secs);
+        }
+
+        HTTP_Response_Array retried = gmail_bulk_fetch(arena, token, retry_requests);
+        for (i64 i = 0; i < retried.count; i++)
+        {
+            result.data[retry_indices.data[i]] = retried.data[i];
+        }
+    }
+
+    return result;
 }
 
 String_Array fetch_message_ids(Arena *arena, String token, i64 n)
@@ -313,7 +439,7 @@ void fetch_history(Arena *arena, String history_id, String token)
     String url = sprint("https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId=%.*s&historyTypes=messageAdded&historyTypes=messageDeleted", LIT(history_id));
     HTTP_Response resp = auth_get(arena, url, token);
     D(resp.body);
-    D(i64_to_string(resp.status));
+    // D(i64_to_string(resp.status));
 }
 
 String get_body_content(Arena *arena, JSON_Element *payload, String desired_mimeType)
@@ -380,7 +506,81 @@ String json_get_header_value(JSON_Element *arr, String key)
     return result;
 }
 
-void save_message(Arena *temp, String json, String email_dir)
+Attachment_Array get_message_attachments(Arena *arena, JSON_Element *payload)
+{
+    Attachment_Array result = {0};
+    if (!payload) return result;
+
+    JSON_Element *parts = json_find(payload, S("parts"));
+    if (!parts) return result;
+
+    for (JSON_EachChild(parts))
+    {
+        String mimeType = json_get(String, it, S("mimeType"));
+        if (string_starts_with(mimeType, S("multipart")))
+        {
+            Attachment_Array children = get_message_attachments(arena, it);
+            array_concat(arena, &result, children);
+            continue;
+        }
+
+        String id = json_to_string(json_find2(it, S("body"), S("attachmentId")));
+        String name  = json_get(String, it, S("filename"));
+        if (id.count && name.count)
+        {
+            Attachment info = {
+                .id = string_push(arena, id),
+                .name  = string_push(arena, name),
+                .mime_type = string_push(arena, mimeType),
+            };
+            array_push(arena, &result, info);
+        }
+    }
+
+    return result;
+}
+
+String get_attachment_path(Arena *arena, String msg_id, Attachment attachment, String attachments_dir)
+{
+    String safe = path_sanitize(arena, attachment.name);
+    return path_join2(arena, attachments_dir, sprint("%.*s_%.*s", LIT(msg_id), LIT(safe)));
+}
+
+void bulk_fetch_attachments(Arena *arena, String token, String msg_id, Attachment_Array attachments, String attachments_dir)
+{
+    String_Array requests = {0};
+    for (i64 index = 0; index < attachments.count; index += 1)
+    {
+        Attachment it = attachments.data[index];
+        array_push(arena, &requests, sprint("GET /gmail/v1/users/me/messages/%.*s/attachments/%.*s", LIT(msg_id), LIT(it.id)));
+    }
+
+    HTTP_Response_Array responses = gmail_bulk_fetch_with_retry(arena, token, requests, 4, 5.0);
+    for (i64 index = 0; index < responses.count; index += 1)
+    {
+        Attachment it = attachments.data[index];
+        HTTP_Response resp = responses.data[index];
+        if (resp.status == 200)
+        {
+            M_Temp temp = arena_begin_temp(arena);
+            {
+                JSON_Element *json = json_parse(temp.arena, resp.body);
+                String encoded = json_get(String, json, S("data"));
+                String data    = base64_decode(temp.arena, encoded);
+
+                String attachment_path = get_attachment_path(arena, msg_id, it, attachments_dir);
+                os_write_entire_file(attachment_path, data);
+            }
+            arena_end_temp(temp);
+        }
+        else
+        {
+            print("Failed to fetch message attachment id '%.*s' status %d\n", LIT(it.id), resp.status);
+        }
+    }
+}
+
+void save_message(Arena *temp, String json, String email_dir, String token, String attachments_dir)
 {
     Arena *arena = temp;
 
@@ -404,6 +604,9 @@ void save_message(Arena *temp, String json, String email_dir)
 
     String text = get_body_text(arena, payload);
     String html = get_body_html(arena, payload);
+
+    Attachment_Array attachments = get_message_attachments(arena, payload);
+    bulk_fetch_attachments(arena, token, id, attachments, attachments_dir);
 
     String_Builder sb = {0};
     sb_print(arena, &sb, "---\n");
@@ -440,6 +643,20 @@ void save_message(Arena *temp, String json, String email_dir)
     sb_print(arena, &sb, "is_draft: %d\n", string_array_contains(label_ids, S("DRAFT")));
     sb_print(arena, &sb, "headers: %.*s\n", LIT(raw_headers));
     sb_print(arena, &sb, "labels: %.*s\n", LIT(raw_labels));
+    if (attachments.count > 0)
+    {
+        sb_print(arena, &sb, "attachements:\n");
+        for (i64 index = 0; index < attachments.count; index += 1)
+        {
+            Attachment it = attachments.data[index];
+
+            String file = get_attachment_path(arena, id, it, attachments_dir);
+            sb_print(arena, &sb, "  -\n");
+            sb_print(arena, &sb, "    file: %.*s\n", LIT(file));
+            sb_print(arena, &sb, "    name: %.*s\n", LIT(it.name));
+            sb_print(arena, &sb, "    type: %.*s\n", LIT(it.mime_type));
+        }
+    }
     sb_print(arena, &sb, "---\n");
     sb_print(arena, &sb, "\n\n");
 
@@ -456,56 +673,37 @@ void save_message(Arena *temp, String json, String email_dir)
     os_write_entire_file(path_join(email_dir, name), contents);
 }
 
-void bulk_fetch_messages(Arena *arena, String_Array ids, String token, String email_dir)
+void bulk_fetch_messages(Arena *arena, String_Array ids, String token, String email_dir, String attachments_dir)
 {
-    assert(ids.count <= 100);
-    String host = S("");
-
-    String headers = string_print(arena, "Authorization: Bearer %.*s\r\nAccept: application/json\r\nContent-Type: multipart/mixed; boundary=\"batch_boundary\"", LIT(token));
-    String_Array bodies = {0};
+    String_Array requests = {0};
     for (i64 index = 0; index < ids.count; index += 1)
     {
-        String it = ids.data[index];
-        String str = sprint("--batch_boundary\r\n\r\nGET /gmail/v1/users/me/messages/%.*s?format=full\r\n", LIT(it), LIT(it));
-        array_push(arena, &bodies, str);
+        String id = ids.data[index];
+        array_push(arena, &requests, sprint("GET /gmail/v1/users/me/messages/%.*s?format=full", LIT(id)));
     }
-    array_push(arena, &bodies, S("\r\n--batch_boundary--"));
 
-    String body = string_concat_array(arena, bodies.data, bodies.count);
-    HTTP_Response resp = platform__http_post(arena, S("https://www.googleapis.com/batch/gmail/v1"), body, headers);
-
-
-    String at = resp.body;
-    // NOTE(nick): skip first part because it's the "container"
-    String part = string_split_iter(&at, S("HTTP/1.1 "));
-
-    i64 index = 0;
-    while (part = string_split_iter(&at, S("HTTP/1.1 ")), part.count > 0)
+    HTTP_Response_Array responses = gmail_bulk_fetch_with_retry(arena, token, requests, 4, 5.0);
+    assert(responses.count == ids.count);
+    for (i64 index = 0; index < responses.count; index += 1)
     {
-        String s = string_slice(part, 0, string_index(part, S(" "), 0));
-        i64 status = string_to_i64(s, 10);
-
-        while (part.count > 0 && part.data[0] != '{') { string_advance(&part, 1); }
-        while (part.count > 0 && part.data[part.count -1] != '}') { part.count -= 1; }
-
-        if (part.count > 0)
+        HTTP_Response resp = responses.data[index];
+        if (resp.status == 200)
         {
-            if (status == 200)
-            {
-                M_Temp temp = arena_begin_temp(arena);
-                save_message(arena, part, email_dir);
-                arena_end_temp(temp);
-            }
-            else
-            {
-                String id = ids.data[index];
-                print("Failed to fetch message id '%.*s' status %d\n", LIT(id), status);
-            }
+            M_Temp temp = arena_begin_temp(arena);
+            save_message(arena, resp.body, email_dir, token, attachments_dir);
+            arena_end_temp(temp);
         }
-
-        index += 1;
+        else
+        {
+            String id = ids.data[index];
+            print("Failed to fetch message id '%.*s' status %d\n", LIT(id), resp.status);
+        }
     }
 }
+
+//
+// App
+//
 
 static struct {
     Arena *persist_arena;
@@ -519,13 +717,23 @@ static struct {
     String email_dir;
     String refresh_path;
 
+    // Settings:
     i32 batch_size;
-    i32 update_every_mins;
+    i32 refresh_interval_mins;
+    i32 fetch_count;
 
+    // Running instance:
     String email;
+    i64 total_count;
+    i64 cached_count;
 
+    // Run info:
     f64 last_run;
-} g_app = {0};
+    b32 is_running;
+} g_app = {
+    .batch_size = 25,
+    .refresh_interval_mins = 5,
+};
 
 void app_run();
 
@@ -538,13 +746,23 @@ void app_menu(i32 x, i32 y)
     MenuItem menu = {0};
     menu_push(arena, &menu, (MenuItem){ .disabled = true, .name = g_app.email });
     menu_push(arena, &menu, (MenuItem){ .separator = true });
-    menu_push(arena, &menu, (MenuItem){ .id = 1, .name = S("Check Now") });
+
+    MenuItem *run = menu_push(arena, &menu, (MenuItem){ .id = 1, .name = S("Check Now") });
+    if (g_app.is_running) {
+        run->name = S("Running...");
+        run->disabled = true;
+    }
+
     menu_push(arena, &menu, (MenuItem){ .disabled = true, .name = last_checked });
+    menu_push(arena, &menu, (MenuItem){ .disabled = true, .name = sprint("%d / %d downloaded", g_app.cached_count, g_app.total_count) });
     
     MenuItem *refresh_menu = menu_push(arena, &menu, (MenuItem){ .id = 10, .name = S("Refresh Interval") });
-        menu_push(arena, refresh_menu, (MenuItem){ .id = 11, .name = S("5 Minutes"), .checked = true });
-        menu_push(arena, refresh_menu, (MenuItem){ .id = 12, .name = S("10 Minutes"), .disabled = true });
-        menu_push(arena, refresh_menu, (MenuItem){ .id = 13, .name = S("15 Minutes"), .disabled = true });
+        menu_push(arena, refresh_menu, (MenuItem){ .id = 11, .name = S("1 Minute"),   .checked = g_app.refresh_interval_mins == 1 });
+        menu_push(arena, refresh_menu, (MenuItem){ .id = 12, .name = S("5 Minutes"),  .checked = g_app.refresh_interval_mins == 5 });
+        menu_push(arena, refresh_menu, (MenuItem){ .id = 13, .name = S("10 Minutes"), .checked = g_app.refresh_interval_mins == 10 });
+        menu_push(arena, refresh_menu, (MenuItem){ .id = 14, .name = S("15 Minutes"), .checked = g_app.refresh_interval_mins == 15 });
+
+    menu_push(arena, &menu, (MenuItem){ .id = 4, .name = S("Open Folder") });
 
     bool exists = os_file_exists(g_app.refresh_path);
     if (exists)
@@ -561,6 +779,7 @@ void app_menu(i32 x, i32 y)
         case 1:
         {
             app_run();
+            arena_reset(g_app.frame_arena);
         } break;
 
         case 2:
@@ -572,6 +791,16 @@ void app_menu(i32 x, i32 y)
         {
             os_delete_file(g_app.refresh_path);
         } break;
+
+        case 4:
+        {
+            os_shell_open(g_app.email_dir);
+        } break;
+
+        case 11: { g_app.refresh_interval_mins = 1; }
+        case 12: { g_app.refresh_interval_mins = 5; }
+        case 13: { g_app.refresh_interval_mins = 10; }
+        case 14: { g_app.refresh_interval_mins = 15; }
     }
 }
 
@@ -630,29 +859,23 @@ void app_init()
     g_app.email_dir = string_push(arena, email_dir);
     g_app.refresh_path = string_push(arena, refresh_path);
     app_run();
+    arena_reset(g_app.frame_arena);
 }
 
 void app_run()
 {
+    if (g_app.is_running)
+    {
+        return;
+    }
+
     // @Incomplete: support multiple accounts...
     Arena *arena = g_app.frame_arena;
-    String email_dir = g_app.email_dir;
+    String parent_email_dir = g_app.email_dir;
     String refresh_path = g_app.refresh_path;
 
+    g_app.is_running = true;
 
-    String attachments_dir = path_join(email_dir, S("attachements"));
-
-    if (!os_make_directory_recursive(email_dir))
-    {
-        print("Failed to make email folder: %.*s\n", LIT(email_dir));
-        return;
-    }
-
-    if (!os_make_directory_recursive(attachments_dir))
-    {
-        print("Failed to make attachements folder: %.*s\n", LIT(attachments_dir));
-        return;
-    }
 
     // Get refresh token if we don't have one
     String refresh_token = S("");
@@ -674,6 +897,7 @@ void app_run()
         {
             print("Failed to get refresh token!\n");
             D(body);
+            g_app.is_running = false;
             return;
         }
 
@@ -688,6 +912,7 @@ void app_run()
     {
         os_delete_file(refresh_path);
         print("Failed to get auth token using refresh token!\n");
+        g_app.is_running = false;
         return;
     }
 
@@ -701,27 +926,6 @@ void app_run()
     }
     D(token);
 
-    HTTP_Response resp = auth_get(arena, S("https://gmail.googleapis.com/gmail/v1/users/me/labels"), token);
-    if (resp.status == 401)
-    {
-        os_delete_file(refresh_path);
-        print("Try again.\n");
-        return;
-    }
-    // D(resp.body);
-
-    print("Scanning directory...\n");
-
-    String_Array files = {0};
-    File_Lister *it = os_file_iter_begin(arena, email_dir);
-    File_Info info = {0};
-    while (os_file_iter_next(arena, it, &info))
-    {
-        if (string_starts_with(info.name, S("."))) continue;
-        String name = string_push(arena, info.name);
-        array_push(arena, &files, name);
-    }
-
     print("Fetching profile...\n");
     JSON_Element *profile = fetch_user_profile(arena, token);
     String email = json_get(String, profile, S("emailAddress"));
@@ -730,10 +934,41 @@ void app_run()
         g_app.email = string_push(g_app.persist_arena, email);
     }
 
+    #if 0
+    HTTP_Response resp = auth_get(arena, S("https://gmail.googleapis.com/gmail/v1/users/me/labels"), token);
+    if (resp.status == 401)
+    {
+        os_delete_file(refresh_path);
+        print("Try again.\n");
+        g_app.is_running = false;
+        return;
+    }
+    // D(resp.body);
+    #endif
+
+    print("Scanning directory...\n");
+    String email_dir = path_join2(arena, parent_email_dir, path_sanitize(arena, email));
+    String attachments_dir = path_join(email_dir, S("attachements"));
+
+    if (!os_make_directory_recursive(email_dir))
+    {
+        print("Failed to make email folder: %.*s\n", LIT(email_dir));
+        g_app.is_running = false;
+        return;
+    }
+    if (!os_make_directory_recursive(attachments_dir))
+    {
+        print("Failed to make attachements folder: %.*s\n", LIT(attachments_dir));
+        g_app.is_running = false;
+        return;
+    }
+
+    String_Array files = os_scan_folder(arena, email_dir);
     print("Fetching ids...\n");
 
-    String_Array all_ids = fetch_message_ids(arena, token, 0);
+    String_Array all_ids = fetch_message_ids(arena, token, g_app.fetch_count);
     print("Total id count: %d\n", all_ids.count);
+    g_app.total_count = all_ids.count;
 
     bool force = false;
 
@@ -746,6 +981,7 @@ void app_run()
             array_push(arena, &ids, id);
         }
     }
+    g_app.cached_count = (all_ids.count - ids.count);
 
     if (force)
     {
@@ -759,8 +995,8 @@ void app_run()
     for (i64 i = 0; i < ids.count; i += batch_size)
     {
         String_Array chunk = array_slice(String_Array, ids, i, i + batch_size);
-        D(i64_to_string(chunk.count));
-        bulk_fetch_messages(arena, chunk, token, email_dir);
+        // D(i64_to_string(chunk.count));
+        bulk_fetch_messages(arena, chunk, token, email_dir, attachments_dir);
         print("Fetching chunk (%d, %d)...\n", i, i+batch_size);
 
         if (i+batch_size < ids.count)
@@ -772,7 +1008,23 @@ void app_run()
     print("Fetched %d emails\n", ids.count);
     print("Run complete! Took %.2fms\n", os_time() * 1000.0);
 
+    // NOTE(nick); after a fetch, re-scan
+    {
+        files = os_scan_folder(arena, email_dir);
+        ids = (String_Array){0};
+        for (i64 i = 0; i < all_ids.count; i += 1)
+        {
+            String id = all_ids.data[i];
+            if (!string_array_any_includes(files, id))
+            {
+                array_push(arena, &ids, id);
+            }
+        }
+        g_app.cached_count = (all_ids.count - ids.count);
+    }
+
     g_app.last_run = os_time();
+    g_app.is_running = false;
 }
 
 void app_tick(f32 dt)
@@ -781,11 +1033,12 @@ void app_tick(f32 dt)
     time += dt;
 
     // @Hack: until we do a proper history api thing, this should suffice...
-    if (time >= 5 * 60)
+    if (time >= 60 * g_app.refresh_interval_mins)
     {
-        time -= 5 * 60;
+        time -= 60 * g_app.refresh_interval_mins;
 
-        app_init();
+        app_run();
+        arena_reset(g_app.frame_arena);
     }
 }
 

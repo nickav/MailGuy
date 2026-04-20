@@ -6,6 +6,13 @@ struct HTTP_Response
     String headers;
 };
 
+typedef struct HTTP_Response_Array HTTP_Response_Array;
+struct HTTP_Response_Array
+{
+    _ArrayHeader_;
+    HTTP_Response *data;
+};
+
 typedef struct MenuItem MenuItem;
 
 typedef struct MenuItem_Array MenuItem_Array;

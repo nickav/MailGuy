@@ -449,8 +449,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
         }
     }
 
-    app_init();
-
     WNDCLASSW wc = {0};
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInst;
@@ -469,6 +467,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     lstrcpyW(g_nid.szTip, L"Mail Guy");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
+
+    app_init();
 
     f64 then = os_time();
     while (g_is_running)
