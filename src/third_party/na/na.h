@@ -404,6 +404,12 @@ static const int __arch_endian_check_num = 1;
 
 #define array_of(x) {(x),count_of(x)}
 
+#if defined(_MSC_VER)
+    #define Align(a) __declspec(align(a))
+#else
+    #define Align(a) __attribute__((aligned(a)))
+#endif
+
 #ifndef typeof
     #ifdef __clang__
         #define typeof(x) __typeof__(x)
@@ -985,6 +991,8 @@ function b32 string_contains(String str, String search);
 function b32 string_in_bounds(String str, i64 at);
 function void string_advance(String *str, i64 count);
 function String string_split_iter(String *text, String search);
+function void string_skip_whitespace(String *text);
+function void string_skip_line(String *text);
 
 // Allocation
 function String string_push(Arena *arena, String str);
@@ -1079,6 +1087,7 @@ function String path_filename(String path);
 function String path_dirname(String path);
 function String path_extension(String path);
 function String path_strip_extension(String path);
+function String path_sanitize(Arena *arena, String path);
 
 function String path_join2(Arena *arena, String a, String b);
 function String path_join3(Arena *arena, String a, String b, String c);
@@ -1099,12 +1108,16 @@ function CLI_Argument string_parse_argument(String_Array array, i64 index);
 #if DEBUG
     #define Dump(...) ArgSelectHelper4((__VA_ARGS__, Dump4, Dump3, Dump2, Dump1))(__VA_ARGS__)
 
+    #define SDump(x) print("%s = %.*s\n", (#x), (x))
+
     #define Dump1(x) print("%s = %s\n", #x, CStr(to_string(x)))
     #define Dump2(x, y) print("%s = %s, %s = %s\n", #x, CStr(to_string(x)), #y, CStr(to_string(y)))
     #define Dump3(x, y, z) print("%s = %s, %s = %s, %s = %s\n", #x, CStr(to_string(x)), #y, CStr(to_string(y)), #z, CStr(to_string(z)))
     #define Dump4(x, y, z, w) print("%s = %s, %s = %s, %s = %s, %s = %s\n", #x, CStr(to_string(x)), #y, CStr(to_string(y)), #z, CStr(to_string(z)), #w, CStr(to_string(w)))
 #else
     #define Dump(...)
+
+    #define SDump(x)
 
     #define Dump1(x)
     #define Dump2(x, y)
@@ -1798,6 +1811,10 @@ function void timing_add_value(Timing_f64 *it, f64 current);
 function void timing_reset(Timing_f64 *it, f64 current);
 function void timing_update(Timing_f64 *it, f64 current, u64 fps);
 
+// Base64
+function String base64_encode(Arena *arena, String input, bool url_safe);
+function String base64_decode(Arena *arena, String input);
+
 #endif // BASE_FUNCTIONS_H
 #ifndef OS_H
 #define OS_H
@@ -1977,6 +1994,8 @@ function bool os_make_directory_recursive(String path);
 function File_Lister *os_file_iter_begin(Arena *arena, String path);
 function bool os_file_iter_next(Arena *arena, File_Lister *iter, File_Info *info);
 function void os_file_iter_end(File_Lister *iter);
+function File_List os_scan_directory(Arena *arena, String path);
+function File_List os_scan_entire_directory(Arena *arena, String path);
 
 // Clipboard
 function String os_get_clipboard_text();
@@ -1985,6 +2004,13 @@ function bool os_set_clipboard_text(String str);
 // Dates
 function Date_Time os_get_current_time_in_utc();
 function Date_Time os_get_local_time();
+function Dense_Time dense_time_from_date_time(Date_Time in);
+function Date_Time date_time_from_dense_time(Dense_Time in);
+function i32 date_days_in_month(i32 month, i32 year);
+function void date_time_local_to_utc(Date_Time *date, i32 utc_offset_mins);
+function void date_time_utc_to_local(Date_Time *date, i32 utc_offset_mins);
+function String date_time_to_sql_date(Date_Time date);
+function String time_ago(f64 now_secs, f64 then_secs);
 
 // Library
 function OS_Library os_library_load(String path);
@@ -1995,12 +2021,6 @@ function bool os_library_is_loaded(OS_Library lib);
 // Shell
 function bool os_shell_open(String path);
 function bool os_shell_execute(String cmd, String arguments, bool admin);
-
-// Dates
-function Date_Time os_get_current_time_in_utc();
-function Date_Time os_get_local_time();
-function Dense_Time dense_time_from_date_time(Date_Time in);
-function Date_Time date_time_from_dense_time(Dense_Time in);
 
 // Misc.
 function void os_get_entropy(void *data, u64 size);
@@ -2101,17 +2121,6 @@ struct Worker_Params
 
 function void work_queue_init(Work_Queue *queue, u64 thread_count);
 function void work_queue_add_entry(Work_Queue *queue, Worker_Proc *callback, void *data);
-
-//
-// Platform-Specific Headers:
-//
-
-#if OS_WINDOWS
-#elif OS_MACOS
-#elif OS_LINUX
-#else
-    #error OS layer not implemented.
-#endif
 
 #endif // OS_H
 
@@ -3020,6 +3029,21 @@ function String string_split_iter(String *text, String search)
     return result;
 }
 
+function void string_skip_whitespace(String *text)
+{
+    while (text->count > 0 && char_is_whitespace(text->data[0]))
+    {
+        string_advance(text, 1);
+    }
+}
+
+function void string_skip_line(String *text)
+{
+    while (text->count > 0 && text->data[0] != '\n')
+    {
+        string_advance(text, 1);
+    }
+}
 
 //
 // Allocation
@@ -3597,8 +3621,10 @@ function String string_from_string16(Arena *arena, String16 str) {
 // Conversions
 //
 
-function u64 string_to_u64(String string, u32 radix)
+function u64 string_to_u64(String str, u32 radix)
 {
+    str = string_trim_whitespace(str);
+
     assert(2 <= radix && radix <= 16);
     local_persist u8 char_to_value[] =
     {
@@ -3608,15 +3634,18 @@ function u64 string_to_u64(String string, u32 radix)
         0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
     };
     u64 value = 0;
-    for (i64 i = 0; i < string.count; i += 1) {
+    for (i64 i = 0; i < str.count; i += 1) {
         value *= radix;
-        u8 c = string.data[i];
+        u8 c = str.data[i];
         value += char_to_value[(c - 0x30)&0x1F];
     }
     return value;
 }
 
-function i64 string_to_i64(String str, u32 base) {
+function i64 string_to_i64(String str, u32 base)
+{
+    str = string_trim_whitespace(str);
+
     u64 p = 0;
     
     // consume sign
@@ -3670,7 +3699,10 @@ function i64 string_to_i64(String str, u32 base) {
     return result;
 }
 
-function f64 string_to_f64(String string) {
+function f64 string_to_f64(String string)
+{
+    string = string_trim_whitespace(string);
+
     char str[64];
     u64 count = string.count;
     if (count > sizeof(str) - 1)
@@ -3682,7 +3714,10 @@ function f64 string_to_f64(String string) {
     return (atof(str));
 }
 
-function b32 string_to_b32(String str) {
+function b32 string_to_b32(String str)
+{
+    str = string_trim_whitespace(str);
+
     return (
         string_match(str, S("true"), MatchFlag_IgnoreCase) ||
         string_match(str, S("yes"), MatchFlag_IgnoreCase) ||
@@ -4191,6 +4226,28 @@ function String path_strip_extension(String path)
     return result;
 }
 
+function String path_sanitize(Arena *arena, String path)
+{
+    path = string_trim_whitespace(path);
+
+    String result = string_push(arena, path);
+
+    for (i64 i = 0; i < result.count; i++)
+    {
+        u8 c = result.data[i];
+        if (
+            c == '/' || c == '\\' || c == ':' || c == '*' ||
+            c == '?' || c == '"'  || c == '<' || c == '>' ||
+            c == '|' || c == '\0' || c < 32
+        )
+        {
+            result.data[i] = '_';
+        }
+    }
+
+    return result;
+}
+
 function String path_join2(Arena *arena, String a, String b)
 {
     return string_print(arena, "%.*s%c%.*s", LIT(a), PATH_SEP, LIT(b));
@@ -4359,6 +4416,7 @@ function void cli_option_parse_bool(CLI_Argument arg, String name, String alias,
 // String Conversions
 //
 
+function String bool_to_string(bool x) { if (x) return S("true"); return S("false"); }
 function String b32_to_string(b32 x)   { if (x) return S("true"); return S("false"); }
 function String char_to_string(char x) { return sprint("%c", x); }
 function String cstr_to_string(char *x) { return string_from_cstr(x); }
@@ -4369,6 +4427,12 @@ function String f32_to_string(f32 x) { return sprint("%.2f", x); }
 function String f64_to_string(f64 x) { return sprint("%.4f", x); }
 function String ptr_to_string(void *x) { return sprint("%p", x); }
 function String String_to_string(String x) { return x; }
+
+function void Dmp_(const char *label, String value) {
+    print("%s = %.*s\n", label, LIT(value));
+}
+
+#define Dmp(x) Dmp_(#x, x)
 
 #if LANG_CPP
 
@@ -4871,6 +4935,98 @@ function void timing_update(Timing_f64 *it, f64 current, u64 fps)
     }
     
     timing_add_value(it, current);
+}
+
+//
+// Base64
+//
+
+// Unified decode table: accepts both standard (+/) and url-safe (-_)
+// Only change from original: index 45 ('-') is now 62 instead of 64
+static const u8 base64__pr2six[256] = {
+    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
+    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
+    64,64,64,64,64,64,64,64,64,64,64,62,64,62,64,63,
+    52,53,54,55,56,57,58,59,60,61,64,64,64,64,64,64,
+    64, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+    15,16,17,18,19,20,21,22,23,24,25,64,64,64,64,63,
+    64,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+    41,42,43,44,45,46,47,48,49,50,51,64,64,64,64,64,
+    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
+    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
+    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
+    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
+    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
+    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
+    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
+    64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
+};
+
+static const char base64__std_mapping[]  = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static const char base64__url_mapping[]  = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+String base64_encode(Arena *arena, String input, bool url_safe)
+{
+    const char *map = url_safe ? base64__url_mapping : base64__std_mapping;
+
+    // url-safe omits padding; standard adds '=' to reach multiple of 4
+    i64 raw_len = (input.count + 2) / 3 * 4;
+    i64 out_len = raw_len + 1;
+    u8 *out = PushArray(arena, u8, out_len);
+    u8 *p = out;
+
+    const u8 *s = input.data;
+    i64 len = input.count;
+    i64 i = 0;
+
+    for (; i < len - 2; i += 3) {
+        *p++ = map[(s[i] >> 2) & 0x3F];
+        *p++ = map[((s[i] & 0x3) << 4) | ((s[i+1] & 0xF0) >> 4)];
+        *p++ = map[((s[i+1] & 0xF) << 2) | ((s[i+2] & 0xC0) >> 6)];
+        *p++ = map[s[i+2] & 0x3F];
+    }
+
+    if (i < len) {
+        *p++ = map[(s[i] >> 2) & 0x3F];
+        if (i == len - 1) {
+            *p++ = map[(s[i] & 0x3) << 4];
+            if (!url_safe) { *p++ = '='; *p++ = '='; }
+        } else {
+            *p++ = map[((s[i] & 0x3) << 4) | ((s[i+1] & 0xF0) >> 4)];
+            *p++ = map[(s[i+1] & 0xF) << 2];
+            if (!url_safe) { *p++ = '='; }
+        }
+    }
+
+    *p = '\0';
+    return string_make(out, p - out);
+}
+
+String base64_decode(Arena *arena, String input)
+{
+    const u8 *bufin = input.data;
+    while (base64__pr2six[*bufin] <= 63) bufin++;
+    i64 nprbytes = bufin - input.data;
+
+    i64 out_len = ((nprbytes + 3) / 4) * 3 + 1;
+    u8 *out = PushArray(arena, u8, out_len);
+    u8 *p = out;
+
+    bufin = input.data;
+    while (nprbytes > 4) {
+        *p++ = (base64__pr2six[bufin[0]] << 2) | (base64__pr2six[bufin[1]] >> 4);
+        *p++ = (base64__pr2six[bufin[1]] << 4) | (base64__pr2six[bufin[2]] >> 2);
+        *p++ = (base64__pr2six[bufin[2]] << 6) |  base64__pr2six[bufin[3]];
+        bufin += 4;
+        nprbytes -= 4;
+    }
+
+    if (nprbytes > 1) *p++ = (base64__pr2six[bufin[0]] << 2) | (base64__pr2six[bufin[1]] >> 4);
+    if (nprbytes > 2) *p++ = (base64__pr2six[bufin[1]] << 4) | (base64__pr2six[bufin[2]] >> 2);
+    if (nprbytes > 3) *p++ = (base64__pr2six[bufin[2]] << 6) |  base64__pr2six[bufin[3]];
+
+    *p = '\0';
+    return string_make(out, p - out);
 }
 
 
@@ -7139,6 +7295,8 @@ function void os_mutex_destroy(Mutex *mutex) {
         mutex->handle = 0;
     }
 }
+#else
+    #error OS layer not implemented.
 #endif
 
 #if OS_LINUX || OS_MACOS
@@ -7504,16 +7662,12 @@ function bool os_write_entire_file(String path, String contents) {
 //
 
 function File_Lister *os_file_iter_begin(Arena *arena, String path) {
-    M_Temp scratch = GetScratch(&arena, 1);
-
-    char *cpath = string_to_cstr(scratch.arena, path);
+    char *cpath = string_to_cstr(arena, path);
     DIR *handle = opendir(cpath);
 
     Unix_File_Lister *it = PushStructZero(arena, Unix_File_Lister);
     it->find_path = cpath;
     it->handle    = handle;
-
-    ReleaseScratch(scratch);
 
     return (File_Lister *)it;
 }
@@ -7525,18 +7679,25 @@ function bool os_file_iter_next(Arena *arena, File_Lister *iter, File_Info *info
         return false;
     }
 
-    struct dirent *data = readdir(it->handle);
-
-    if (data != NULL)
+    struct dirent *entry = readdir(it->handle);
+    if (entry != NULL)
     {
-        char buffer[PATH_MAX + 1];
-        if (realpath(data->d_name, buffer) != NULL)
-        {
-            *info = os_get_file_info(string_from_cstr(buffer));
+        String path = string_push(arena, sprint("%s/%s", it->find_path, entry->d_name));
+        struct stat st;
+        if (stat((char *)path.data, &st) == 0) {
+            info->path = path;
+            info->name = string_push(arena, string_from_cstr(entry->d_name));
+             // NOTE(nick): not really created time, but UNIX doesn't have this concept
+            info->size             = st.st_size;
+            info->flags            = unix_flags_from_mode(st.st_mode, info->name);
+            info->access           = unix_access_from_mode(st.st_mode);
+            info->created_at       = unix_date_from_time(st.st_ctime);
+            info->updated_at       = unix_date_from_time(st.st_mtime);
+            info->last_accessed_at = unix_date_from_time(st.st_atime);
         }
     }
 
-    return data != NULL;
+    return entry != NULL;
 }
 
 function void os_file_iter_end(File_Lister *iter) {
@@ -7788,6 +7949,27 @@ function void os_file_print(File *file, char *fmt, ...)
     ReleaseScratch(scratch);
 }
 
+function File_List os_scan_directory(Arena *arena, String path)
+{
+    File_List result = {0};
+
+    File_Lister *it = os_file_iter_begin(arena, path);
+    File_Info *info = PushArrayZero(arena, File_Info, 1);
+    while (os_file_iter_next(arena, it, info))
+    {
+        if (string_equals(info->name, S(".")) || string_equals(info->name, S(".."))) continue;
+
+        info->path = string_concat3(arena, path, PATH_SEPARATOR, info->name);
+        DLLPushBack(result.first, result.last, info);
+        result.count += 1;
+
+        info = PushArrayZero(arena, File_Info, 1);
+    }
+    os_file_iter_end(it);
+
+    return result;
+}
+
 function File_List os_scan_entire_directory(Arena *arena, String path)
 {
     M_Temp scratch = GetScratch(&arena,1);
@@ -7907,6 +8089,78 @@ function Date_Time date_time_from_dense_time(Dense_Time in) {
     result.year = (i16)(year_encoded - 0x8000);
 
     return result;
+}
+
+function i32 date_days_in_month(i32 mon, i32 year)
+{
+    static const i32 d[] = {0,31,28,31,30,31,30,31,31,30,31,30,31};
+    if (mon == 2)
+    {
+        int leap = (year % 4 == 0) && (year % 100 != 0 || year % 400 == 0);
+        return 28 + leap;
+    }
+    return d[mon];
+}
+
+function void date_time_shift_minutes(Date_Time *dt, int offset_mins)
+{
+    int total_mins = dt->hour * 60 + dt->min + offset_mins;
+
+    int day_delta = 0;
+    if      (total_mins <    0) { total_mins += 1440; day_delta = -1; }
+    else if (total_mins >= 1440) { total_mins -= 1440; day_delta = +1; }
+
+    dt->hour = total_mins / 60;
+    dt->min  = total_mins % 60;
+
+    int day = dt->day + day_delta;
+    int mon = dt->mon;
+    int year = dt->year;
+
+    if (day < 1)
+    {
+        if (--mon < 1) { mon = 12; year--; }
+        day = date_days_in_month(mon, year);
+    }
+    else if (day > date_days_in_month(mon, year))
+    {
+        day = 1;
+        if (++mon > 12) { mon = 1; year++; }
+    }
+
+    dt->day  = day;
+    dt->mon  = mon;
+    dt->year = year;
+}
+
+function void date_time_local_to_utc(Date_Time *date, i32 utc_offset_mins)
+{
+    date_time_shift_minutes(date, -utc_offset_mins);
+}
+
+function void date_time_utc_to_local(Date_Time *date, i32 utc_offset_mins)
+{
+    date_time_shift_minutes(date, utc_offset_mins);
+}
+
+function String date_time_to_sql_date(Date_Time date)
+{
+    return sprint("%04d-%02d-%02d", date.year, date.mon, date.day);
+}
+
+function String time_ago(f64 now_secs, f64 then_secs)
+{
+    f64 diff = now_secs - then_secs;
+
+    if (diff < 5) return S("just now");
+    if (diff < 60) return sprint("%d seconds ago", (i32)diff);
+    if (diff < 120) return S("1 minute ago");
+    if (diff < 3600) return sprint("%d minutes ago", (i32)(diff / 60));
+    if (diff < 7200) return S("1 hour ago");
+    if (diff < 86400) return sprint("%d hours ago", (i32)(diff / 3600));
+    if (diff < 172800) return S("yesterday");
+
+    return sprint("%d days ago", (i32)(diff / 86400));
 }
 
 function b32 os__do_next_work_queue_entry(Work_Queue *queue)

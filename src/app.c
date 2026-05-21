@@ -97,47 +97,6 @@ i32 days_in_month(i32 mon, i32 year)
     return d[mon];
 }
 
-void date_time_shift_minutes(Date_Time *dt, int offset_mins)
-{
-    int total_mins = dt->hour * 60 + dt->min + offset_mins;
-
-    int day_delta = 0;
-    if      (total_mins <    0) { total_mins += 1440; day_delta = -1; }
-    else if (total_mins >= 1440) { total_mins -= 1440; day_delta = +1; }
-
-    dt->hour = total_mins / 60;
-    dt->min  = total_mins % 60;
-
-    int day = dt->day + day_delta;
-    int mon = dt->mon;
-    int year = dt->year;
-
-    if (day < 1)
-    {
-        if (--mon < 1) { mon = 12; year--; }
-        day = days_in_month(mon, year);
-    }
-    else if (day > days_in_month(mon, year))
-    {
-        day = 1;
-        if (++mon > 12) { mon = 1; year++; }
-    }
-
-    dt->day  = day;
-    dt->mon  = mon;
-    dt->year = year;
-}
-
-void date_time_local_to_utc(Date_Time *date, i32 utc_offset_mins)
-{
-    date_time_shift_minutes(date, -utc_offset_mins);
-}
-
-void date_time_utc_to_local(Date_Time *date, i32 utc_offset_mins)
-{
-    date_time_shift_minutes(date, utc_offset_mins);
-}
-
 Date_Time parse_email_date(String date)
 {
     Date_Time result = {0};
@@ -247,48 +206,6 @@ Date_Time parse_email_date(String date)
 
     // Convert to UTC time
     date_time_local_to_utc(&result, utc_offset_mins);
-
-    return result;
-}
-
-String date_time_to_sql_date(Date_Time date)
-{
-    return sprint("%04d-%02d-%02d", date.year, date.mon, date.day);
-}
-
-function String time_ago(f64 now, f64 then)
-{
-    f64 diff = now - then;
-
-    if (diff < 5) return S("just now");
-    if (diff < 60) return sprint("%d seconds ago", (i32)diff);
-    if (diff < 120) return S("1 minute ago");
-    if (diff < 3600) return sprint("%d minutes ago", (i32)(diff / 60));
-    if (diff < 7200) return S("1 hour ago");
-    if (diff < 86400) return sprint("%d hours ago", (i32)(diff / 3600));
-    if (diff < 172800) return S("yesterday");
-
-    return sprint("%d days ago", (i32)(diff / 86400));
-}
-
-function String path_sanitize(Arena *arena, String str)
-{
-    str = string_trim_whitespace(str);
-
-    String result = string_push(arena, str);
-
-    for (i64 i = 0; i < result.count; i++)
-    {
-        u8 c = result.data[i];
-        if (
-            c == '/' || c == '\\' || c == ':' || c == '*' ||
-            c == '?' || c == '"'  || c == '<' || c == '>' ||
-            c == '|' || c == '\0' || c < 32
-        )
-        {
-            result.data[i] = '_';
-        }
-    }
 
     return result;
 }
@@ -868,6 +785,7 @@ void app_init()
 
     g_app.email_dir = string_push(arena, email_dir);
     g_app.refresh_path = string_push(arena, refresh_path);
+
     app_run();
     arena_reset(g_app.frame_arena);
 }
@@ -959,7 +877,7 @@ void app_run()
     #endif
 
     String email_dir = path_join2(arena, parent_email_dir, path_sanitize(arena, email));
-    String attachments_dir = path_join(email_dir, S("attachements"));
+    String attachments_dir = path_join2(arena, email_dir, S("attachements"));
 
     if (!os_make_directory_recursive(email_dir))
     {
@@ -995,6 +913,9 @@ void app_run()
         }
     }
     g_app.cached_count = (all_ids.count - ids.count);
+
+    D(i64_to_string(g_app.cached_count));
+    return;
 
     print("  -> Already cached: %d\n", (all_ids.count - ids.count));
     print("  -> IDs to fetch: %d\n", ids.count);
