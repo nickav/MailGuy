@@ -914,9 +914,6 @@ void app_run()
     }
     g_app.cached_count = (all_ids.count - ids.count);
 
-    D(i64_to_string(g_app.cached_count));
-    return;
-
     print("  -> Already cached: %d\n", (all_ids.count - ids.count));
     print("  -> IDs to fetch: %d\n", ids.count);
 

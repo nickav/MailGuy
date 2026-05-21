@@ -4,7 +4,6 @@
 #define impl
 #include "third_party/na/na.h"
 #include "third_party/na/json.h"
-#include "third_party/base64.h"
 
 #include <winhttp.h>
 #include <winsock2.h>
