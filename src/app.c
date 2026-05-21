@@ -607,7 +607,7 @@ void save_message(Arena *temp, String json, String email_dir, String token, Stri
     Attachment_Array attachments = get_message_attachments(arena, payload);
     if (attachments.count > 0)
     {
-        print("  -> Bulk fetching %d attachment(s) for message ID %.*s\n", LIT(attachments), LIT(id));
+        print("  -> Bulk fetching %d attachment(s) for message ID %.*s\n", attachments.count, LIT(id));
         bulk_fetch_attachments(arena, token, id, attachments, attachments_dir);
     }
 

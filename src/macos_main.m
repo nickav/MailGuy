@@ -431,7 +431,7 @@ int main(int argc, char **argv)
         {
             [NSApp sendEvent:event];
         }
-        app_tick();
+        app_tick(1.0 / 60.0);
         usleep(16000);
     }
 

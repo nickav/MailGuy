@@ -12,7 +12,7 @@ pushd $project_root
 mkdir -p build
 pushd build
 
-    ~/bin/ntime clang -DDEBUG=1 -I ../src $flags $libs ../src/macos_main.m -o $exe
+    ~/bin/ntime clang -DDEBUG=1 -I ../src $flags $libs ../src/macos_main.m -o $exe -fdiagnostics-absolute-paths
     ./$exe
     
 popd
