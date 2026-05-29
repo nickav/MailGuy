@@ -747,6 +747,7 @@ void app_init()
         assert(os_make_directory(app_data));
     }
     g_app.app_data = string_push(arena, app_data);
+    print("App data: %.*s\n", LIT(g_app.app_data));
 
     String secrets_path1 = path_join(app_data, S("client_secret.json"));
     String secrets_path2 = path_join(exe_dir, S("client_secret.json"));
