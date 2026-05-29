@@ -565,7 +565,7 @@ void save_message(Arena *temp, String json, String email_dir, String token, Stri
     sb_print(arena, &sb, "labels: %.*s\n", LIT(raw_labels));
     if (attachments.count > 0)
     {
-        sb_print(arena, &sb, "attachements:\n");
+        sb_print(arena, &sb, "attachments:\n");
         for (i64 index = 0; index < attachments.count; index += 1)
         {
             Attachment it = attachments.data[index];
@@ -877,7 +877,7 @@ void app_run()
     #endif
 
     String email_dir = path_join2(arena, parent_email_dir, path_sanitize(arena, email));
-    String attachments_dir = path_join2(arena, email_dir, S("attachements"));
+    String attachments_dir = path_join2(arena, email_dir, S("attachments"));
 
     if (!os_make_directory_recursive(email_dir))
     {
@@ -887,7 +887,7 @@ void app_run()
     }
     if (!os_make_directory_recursive(attachments_dir))
     {
-        print("Failed to make attachements folder: %.*s\n", LIT(attachments_dir));
+        print("Failed to make attachments folder: %.*s\n", LIT(attachments_dir));
         g_app.is_running = false;
         return;
     }
