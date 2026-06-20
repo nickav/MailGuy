@@ -478,9 +478,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     SetConsoleCtrlHandler(win32__console_ctrl_handler, TRUE);
 
     app_init();
-    app_main();
+    app_run();
 
-    #if 0
     f64 then = os_time();
     while (g_is_running)
     {
@@ -500,7 +499,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
 
         Sleep(16);
     }
-    #endif
 
     app_quit();
 
