@@ -3,6 +3,8 @@
 
 #define impl
 #include "third_party/na/na.h"
+#include "third_party/na/na_math.h"
+#include "third_party/na/na_window.h"
 #include "third_party/na/json.h"
 
 #include <winhttp.h>
@@ -476,7 +478,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     SetConsoleCtrlHandler(win32__console_ctrl_handler, TRUE);
 
     app_init();
+    app_main();
 
+    #if 0
     f64 then = os_time();
     while (g_is_running)
     {
@@ -496,6 +500,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
 
         Sleep(16);
     }
+    #endif
 
     app_quit();
 

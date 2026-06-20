@@ -787,83 +787,8 @@ void app_init()
     g_app.email_dir = string_push(arena, email_dir);
     g_app.refresh_path = string_push(arena, refresh_path);
 
-    app_run();
+    // app_run();
     arena_reset(g_app.frame_arena);
-}
-
-typedef struct Read_File Read_File;
-struct Read_File {
-    String path;
-    String data; // os_alloc'd; caller frees with Free(data.data)
-};
-
-typedef struct Read_Dir_Result Read_Dir_Result;
-struct Read_Dir_Result {
-    Read_File *files;
-    i64 count;
-};
-
-typedef struct Dir_Read_Job Dir_Read_Job;
-struct Dir_Read_Job {
-    Read_File *files;
-    i64 count;
-    u64 volatile next;
-    u64 volatile done;
-};
-
-String read_file_malloc(String path) {
-    File f = os_file_open(path, FileMode_Read);
-    if (f.has_errors) { os_file_close(&f); return StructLit(String){0}; }
-
-    u64 size = os_file_get_size(f);
-    if (size == 0) { os_file_close(&f); return StructLit(String){0}; }
-
-    u8 *data = New(u8, size);
-    os_file_read(&f, 0, size, data);
-    os_file_close(&f);
-
-    if (f.has_errors) { Free(data); return StructLit(String){0}; }
-    return string_make(data, size);
-}
-
-THREAD_PROC(dir_read_worker) {
-    Dir_Read_Job *job = (Dir_Read_Job *)data;
-    for (;;) {
-        u64 i = atomic_add_u64(&job->next, 1);
-        if (i >= (u64)job->count) break;
-        job->files[i].data = read_file_malloc(job->files[i].path);
-    }
-    atomic_add_u64(&job->done, 1);
-    return 0;
-}
-
-Read_Dir_Result os_read_directory_threaded(Arena *arena, String path, u32 thread_count) {
-    File_List list = os_scan_directory(arena, path);
-
-    Dir_Read_Job job = {0};
-    job.files = PushArrayZero(arena, Read_File, list.count);
-    for (File_Info *it = list.first; it != NULL; it = it->next) {
-        if (os_file_is_directory(*it)) continue;
-        job.files[job.count].path = it->path;
-        job.count += 1;
-    }
-
-    Read_Dir_Result result = {0};
-    result.files = job.files;
-    result.count = job.count;
-    if (job.count == 0) return result;
-
-    if (thread_count == 0) thread_count = 4;
-    thread_count = (u32)ClampTop((i64)thread_count, job.count);
-
-    for (u32 i = 0; i < thread_count; i += 1) {
-        Thread t = os_thread_create(dir_read_worker, &job, 0);
-        os_thread_detach(t);
-    }
-
-    while (job.done < thread_count) os_sleep(0.0005);
-
-    return result;
 }
 
 String yaml_find_key(String text, String key)
@@ -876,6 +801,50 @@ String yaml_find_key(String text, String key)
         }
     }
     return StructLit(String){0};
+}
+
+String yaml_extract_frontmatter(String text)
+{
+    i64 open  = string_index(text, S("---\n"), 0);
+    if (open >= 0) {
+        i64 close = string_index(text, S("---\n"), open + 4);
+        if (close >= 0) {
+            return string_slice(text, open + 4, close);
+        }
+    }
+    return text;
+}
+
+void app_main()
+{
+    window_init();
+
+    Window_Create_Params params = {0};
+    params.center = true;
+    Window *window = window_create(v2i(1280, 800), S("Hello, Sailor!"), &params);
+
+    Arena *arena = g_app.frame_arena;
+
+    String_Array email_folders = os_scan_folder(arena, g_app.email_dir);
+    String email_dir = path_join(g_app.email_dir, email_folders.data[0]);
+    D(email_dir);
+
+    String_Array files = os_scan_folder(arena, email_dir);
+    print("  -> Found %d file(s)\n", files.count);
+
+    while (!window_should_close(window))
+    {
+        f64 dt = window_begin_frame(temp_arena(), window);
+
+        if (keyboard_pressed(Key_F11))
+        {
+            window_set_fullscreen(window, !window_is_fullscreen(window));
+        }
+
+        window_end_frame(window);
+        arena_reset(temp_arena());
+        arena_reset(arena);
+    }
 }
 
 void app_run()
@@ -1048,14 +1017,7 @@ void app_run()
     g_app.last_run = os_time();
     g_app.is_running = false;
 
-    // Took 10.165918ms
-    // count: 1175
-    // 10ms per 1000 emails
-    f32 then = os_time();
-    Read_Dir_Result result = os_read_directory_threaded(g_app.frame_arena, email_dir, 16);
-    print("Took %fms\n", (os_time() - then) * 1000.0);
-    print("count: %d\n", result.count);
-
+    #if 0
     for (i64 i = 0; i < result.count; i += 1) {
         String text = result.files[i].data;
         String subject = yaml_find_key(text, S("Subject:"));
@@ -1063,10 +1025,13 @@ void app_run()
         print("Subject: %.*s\n", LIT(subject));
         print("From: %.*s\n", LIT(from));
     }
+    #endif
 }
 
 void app_tick(f32 dt)
 {
+    // app_demo(email_dir);
+
     static f64 time = 0;
     time += dt;
 
